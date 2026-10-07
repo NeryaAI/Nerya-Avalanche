@@ -1,0 +1,355 @@
+"""PermissionEngine — allow / ask / deny for native tool calls.
+
+Replaces the mix of ``ACP approve``, ``manifest approval_gate``, and
+``risk_gate`` that lives across :mod:`nerya.skills.permissions`,
+:mod:`nerya.acp.protocol`, and ad-hoc dashboard prompts with a single
+in-process engine.
+
+Inputs:
+* ``descriptor`` — :class:`ToolDescriptor` (carries default risk +
+  permission scope + auto_approve flag).
+* ``payload``   — concrete arguments. The descriptor's risk_classifier
+  may upgrade the call's risk level.
+* ``context``   — :class:`PermissionContext` (mode, session-allowed,
+  permanent rules, deny rules, caller).
+
+Outputs:
+* :class:`PermissionDecision` — ``ALLOW`` | ``ASK`` | ``DENY``.
+
+Decisions are written to the transcript by the executor;
+the engine itself is pure-data and easily unit-testable.
+
+Implementation notes:
+  approval boundary)
+"""
+
+from __future__ import annotations
+
+import enum
+import re
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+from .types import PermissionScope, RiskLevel, ToolDescriptor
+from .capability_policy import normalise_tool_policy, tool_policy_allows
+
+
+class PermissionMode(str, enum.Enum):
+    """Top-level operator policy.
+
+    * ``DEFAULT``    — risk-based: READ/WRITE auto-allowed, EXEC asks,
+      DANGEROUS asks unless a producer-owned domain gate handles it.
+    * ``AUTO``       — unattended for low/medium-risk work (used by eval /
+      cron); DANGEROUS operations still ask and the engine still enforces
+      deny rules and sandboxed scopes.
+    * ``YOLO``       — unattended native-tool execution. The permission
+      layer still enforces deny rules, but does not stop on risk labels.
+      Domain safety gates inside handlers (for example trading risk /
+      approval gates) remain responsible for their own invariants.
+    """
+
+    DEFAULT = "default"
+    AUTO = "auto"
+    YOLO = "yolo"
+
+
+class PermissionDecisionKind(str, enum.Enum):
+    ALLOW = "allow"
+    ASK = "ask"
+    DENY = "deny"
+
+
+@dataclass
+class PermissionRule:
+    """One allow/deny rule.
+
+    Rules can match by ``tool`` (exact or wildcard), ``namespace`` (e.g.
+    ``mcp``), or by a compiled ``payload_regex`` against the rendered
+    payload (used for ``run_shell command="git push *"``).
+    """
+
+    tool: Optional[str] = None
+    namespace: Optional[str] = None
+    payload_regex: Optional[str] = None
+    decision: PermissionDecisionKind = PermissionDecisionKind.ALLOW
+    reason: str = ""
+
+    def matches(self, descriptor: ToolDescriptor, payload: dict[str, Any]) -> bool:
+        if self.tool is not None and self.tool != "*":
+            if not _glob_match(self.tool, descriptor.name):
+                return False
+        if self.namespace is not None and descriptor.namespace != self.namespace:
+            return False
+        if self.payload_regex:
+            try:
+                rendered = _payload_text(payload)
+            except Exception:
+                rendered = ""
+            if not re.search(self.payload_regex, rendered):
+                return False
+        return True
+
+
+def _glob_match(pattern: str, name: str) -> bool:
+    """Tiny glob: ``*`` matches anything, ``foo:*`` matches namespace,
+    ``run_shell:git push *`` matches command prefix."""
+
+    if pattern == "*":
+        return True
+    if "*" not in pattern:
+        return pattern == name
+    rx = re.escape(pattern).replace(r"\*", ".*")
+    return re.fullmatch(rx, name) is not None
+
+
+def _payload_text(payload: dict[str, Any]) -> str:
+    import json as _json
+
+    try:
+        return _json.dumps(payload, ensure_ascii=False, default=str)
+    except Exception:
+        return str(payload)
+
+
+# ---------------------------------------------------------------------------
+# Request / Decision dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PermissionRequest:
+    """Carries everything the engine needs to decide a single call."""
+
+    descriptor: ToolDescriptor
+    payload: dict[str, Any] = field(default_factory=dict)
+    caller: str = "agent:native"
+    turn_id: str = ""
+    iteration: int = 0
+
+
+@dataclass
+class PermissionDecision:
+    """Engine output. The executor writes this to the transcript."""
+
+    kind: PermissionDecisionKind
+    reason: str = ""
+    rule: Optional[PermissionRule] = None
+    risk: RiskLevel = RiskLevel.READ
+    scope: PermissionScope = PermissionScope.NONE
+    requires_approval: bool = False
+    approval_reason: str = ""
+    approval_id: str = ""
+
+    def is_allow(self) -> bool:
+        return self.kind is PermissionDecisionKind.ALLOW
+
+    def is_ask(self) -> bool:
+        return self.kind is PermissionDecisionKind.ASK
+
+    def is_deny(self) -> bool:
+        return self.kind is PermissionDecisionKind.DENY
+
+    def asdict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind.value,
+            "reason": self.reason,
+            "rule": (
+                {
+                    "tool": self.rule.tool,
+                    "namespace": self.rule.namespace,
+                    "payload_regex": self.rule.payload_regex,
+                    "decision": self.rule.decision.value,
+                    "reason": self.rule.reason,
+                }
+                if self.rule
+                else None
+            ),
+            "risk": self.risk.value,
+            "scope": self.scope.value,
+            "requires_approval": self.requires_approval,
+            "approval_reason": self.approval_reason,
+            "approval_id": self.approval_id,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PermissionContext:
+    """Session/operator state the engine reads from.
+
+    The agent kernel constructs this once per turn; the executor passes
+    it into :meth:`PermissionEngine.evaluate` for every tool call.
+    """
+
+    mode: PermissionMode = PermissionMode.DEFAULT
+    permanent_rules: list[PermissionRule] = field(default_factory=list)
+    session_rules: list[PermissionRule] = field(default_factory=list)
+    deny_rules: list[PermissionRule] = field(default_factory=list)
+    tool_policy: dict[str, Any] = field(default_factory=dict)
+    plan_only: bool = False
+    current_tool_policy: Any = None
+
+
+class PermissionEngine:
+    """Stateless engine evaluating a :class:`PermissionRequest`.
+
+    The state lives in :class:`PermissionContext`; the engine itself
+    is reusable across turns / sessions.
+    """
+
+    def evaluate(
+        self,
+        request: PermissionRequest,
+        context: PermissionContext,
+    ) -> PermissionDecision:
+        descriptor = request.descriptor
+        payload = request.payload
+
+        risk = descriptor.per_call_risk(payload)
+        scope = descriptor.permission_scope
+        auto_approve = descriptor.per_call_auto_approve(payload)
+        # Plan mode is a server-owned ceiling, including YOLO and dynamic risks.
+        if context.plan_only and (not descriptor.read_only or risk is not RiskLevel.READ or scope is PermissionScope.SECRETS):
+            return PermissionDecision(kind=PermissionDecisionKind.DENY,
+                reason="plan mode permits investigation only", risk=risk, scope=scope)
+        if not tool_policy_allows(normalise_tool_policy(context.tool_policy), descriptor.name):
+            return PermissionDecision(kind=PermissionDecisionKind.DENY,
+                reason="tool outside configured capability scope", risk=risk, scope=scope)
+        if context.current_tool_policy is not None:
+            try:current=context.current_tool_policy()
+            except Exception:current={'deny':['*']}
+            if not tool_policy_allows(normalise_tool_policy(current),descriptor.name):
+                return PermissionDecision(kind=PermissionDecisionKind.DENY,
+                    reason='tool scope was narrowed or revoked',risk=risk,scope=scope)
+
+        if context.mode is PermissionMode.YOLO:
+            for rule in context.deny_rules:
+                if rule.matches(descriptor, payload):
+                    return PermissionDecision(
+                        kind=PermissionDecisionKind.DENY,
+                        reason=rule.reason or "denied by deny rule",
+                        rule=rule,
+                        risk=risk,
+                        scope=scope,
+                    )
+            return PermissionDecision(
+                kind=PermissionDecisionKind.ALLOW,
+                reason="yolo mode",
+                risk=risk,
+                scope=scope,
+            )
+
+        for rule in context.deny_rules:
+            if rule.matches(descriptor, payload):
+                return PermissionDecision(
+                    kind=PermissionDecisionKind.DENY,
+                    reason=rule.reason or "denied by deny rule",
+                    rule=rule,
+                    risk=risk,
+                    scope=scope,
+                )
+
+        if auto_approve:
+            return PermissionDecision(
+                kind=PermissionDecisionKind.ALLOW,
+                reason=(
+                    "auto_approve descriptor"
+                    if descriptor.auto_approve
+                    else "auto_approve predicate"
+                ),
+                risk=risk,
+                scope=scope,
+            )
+
+        for rules in (context.session_rules, context.permanent_rules):
+            for rule in rules:
+                if rule.matches(descriptor, payload):
+                    if rule.decision is PermissionDecisionKind.ALLOW:
+                        return PermissionDecision(
+                            kind=PermissionDecisionKind.ALLOW,
+                            reason=rule.reason or "matched allow rule",
+                            rule=rule,
+                            risk=risk,
+                            scope=scope,
+                        )
+                    if rule.decision is PermissionDecisionKind.DENY:
+                        return PermissionDecision(
+                            kind=PermissionDecisionKind.DENY,
+                            reason=rule.reason or "matched deny rule",
+                            rule=rule,
+                            risk=risk,
+                            scope=scope,
+                        )
+
+        if context.mode is PermissionMode.AUTO:
+            if risk is RiskLevel.DANGEROUS:
+                return PermissionDecision(
+                    kind=PermissionDecisionKind.ASK,
+                    reason="auto mode escalates DANGEROUS to ask",
+                    risk=risk,
+                    scope=scope,
+                    requires_approval=True,
+                    approval_reason="dangerous tool requires explicit approval",
+                )
+            return PermissionDecision(
+                kind=PermissionDecisionKind.ALLOW,
+                reason="auto mode",
+                risk=risk,
+                scope=scope,
+            )
+
+        if risk is RiskLevel.READ:
+            return PermissionDecision(
+                kind=PermissionDecisionKind.ALLOW,
+                reason="read-only tool",
+                risk=risk,
+                scope=scope,
+            )
+        if risk is RiskLevel.WRITE:
+            if scope in (PermissionScope.WORKSPACE, PermissionScope.SANDBOX):
+                return PermissionDecision(
+                    kind=PermissionDecisionKind.ALLOW,
+                    reason="workspace write within scope",
+                    risk=risk,
+                    scope=scope,
+                )
+            return PermissionDecision(
+                kind=PermissionDecisionKind.ASK,
+                reason="write outside workspace requires approval",
+                risk=risk,
+                scope=scope,
+                requires_approval=True,
+                approval_reason=f"write to {scope.value}",
+            )
+        if risk is RiskLevel.EXEC:
+            return PermissionDecision(
+                kind=PermissionDecisionKind.ASK,
+                reason="shell / external execution",
+                risk=risk,
+                scope=scope,
+                requires_approval=True,
+                approval_reason="shell or network execution",
+            )
+        return PermissionDecision(
+            kind=PermissionDecisionKind.ASK,
+            reason="dangerous tool",
+            risk=risk,
+            scope=scope,
+            requires_approval=True,
+            approval_reason="dangerous classification",
+        )
+
+
+__all__ = [
+    "PermissionContext",
+    "PermissionDecision",
+    "PermissionDecisionKind",
+    "PermissionEngine",
+    "PermissionMode",
+    "PermissionRequest",
+    "PermissionRule",
+]

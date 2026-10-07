@@ -1,0 +1,749 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslations } from "next-intl";
+import { clientApi } from "../../lib/clientApi";
+import type {
+  ControlPlaneExecutor,
+  ControlPlaneOrder,
+} from "../../lib/clientApi";
+import {
+  Advanced,
+  Card,
+  Empty,
+  ErrorBanner,
+  Kpi,
+  LoadingState,
+  PageBody,
+  PageHeader,
+  Pill,
+} from "../../components/Page";
+import { JsonView } from "../../components/JsonView";
+import { SectionTabs } from "../../components/SectionTabs";
+import { Select } from "../../components/Select";
+import { FilterBar, SearchField, Pagination, TableViewport, useListPage } from "../../components/ListControls";
+import { ModalFrame } from "../../components/ModalFrame";
+import { finiteNumber } from "../../lib/financeDisplay";
+import { ModePill } from "../../components/ModePill";
+import { formatTsShort } from "../../lib/format";
+import { confirm as confirmDialog } from "../../lib/dialogs";
+
+type OrderState = "active" | "cached" | "lost" | "recent";
+
+function orderStateTone(state: string): "neutral" | "ok" | "warn" | "danger" | "brand" {
+  if (state === "filled") return "ok";
+  if (state === "canceled" || state === "lost") return "danger";
+  if (state === "rejected" || state === "expired") return "danger";
+  if (state === "partially_filled") return "warn";
+  if (state === "open" || state === "submitted") return "brand";
+  return "neutral";
+}
+
+function executorStateTone(state: string): "neutral" | "ok" | "warn" | "danger" | "brand" {
+  if (state === "completed") return "ok";
+  if (state === "canceled" || state === "failed") return "danger";
+  if (state === "running") return "brand";
+  if (state === "pending" || state === "submitted") return "warn";
+  return "neutral";
+}
+
+// Raw enum -> ordersPage.* translation key. Values missing from the map
+// (new backend enums) fall back to the raw string instead of crashing.
+const ORDER_STATUS_KEYS: Record<string, string> = {
+  open: "statusOpen",
+  submitted: "statusSubmitted",
+  partially_filled: "statusPartiallyFilled",
+  filled: "statusFilled",
+  canceled: "statusCanceled",
+  rejected: "statusRejected",
+  expired: "statusExpired",
+  lost: "statusLost",
+};
+
+const ORDER_SIDE_KEYS: Record<string, string> = {
+  buy: "sideBuy",
+  sell: "sideSell",
+};
+
+const ORDER_TYPE_KEYS: Record<string, string> = {
+  limit: "typeLimit",
+  market: "typeMarket",
+};
+
+const EXECUTOR_STATE_KEYS: Record<string, string> = {
+  created: "executorCreated",
+  reserving: "executorReserving",
+  ready: "executorReady",
+  submitted: "executorSubmitted",
+  working: "executorWorking",
+  closing: "executorClosing",
+  canceling: "executorCanceling",
+  canceled: "executorCanceled",
+  done: "executorDone",
+  failed: "executorFailed",
+  rejected: "executorRejected",
+};
+
+const EXECUTOR_KIND_KEYS: Record<string, string> = {
+  market_order: "kindMarketOrder",
+  limit_order: "kindLimitOrder",
+  limit_chaser: "kindLimitChaser",
+  twap: "kindTwap",
+  position_protection: "kindPositionProtection",
+  rebalance: "kindRebalance",
+};
+
+function enumLabel(
+  map: Record<string, string>,
+  value: string,
+  t: (key: string) => string,
+): string {
+  const key = map[value] ?? map[value.toLowerCase()];
+  return key ? t(key) : value;
+}
+
+function ageMs(ts?: number | null): string {
+  if (!ts) return "–";
+  const ms = Date.now() - Number(ts) * (Number(ts) < 1e12 ? 1000 : 1);
+  if (ms < 0) return "now";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+function fmtTs(ts?: number | null): string {
+  if (!ts) return "–";
+  const seconds = Number(ts) > 1e12 ? Number(ts) / 1000 : Number(ts);
+  return formatTsShort(new Date(seconds * 1000).toISOString());
+}
+
+function num(v: unknown, digits = 6): string {
+  const n = finiteNumber(v);
+  if (n === null) return "–";
+  return n.toLocaleString(undefined, { maximumFractionDigits: digits });
+}
+
+export default function OrdersPage() {
+  const t = useTranslations("orders");
+  const tCommon = useTranslations("common");
+  const tEnum = useTranslations("ordersPage");
+  const [stateFilter, setStateFilter] = useState<OrderState>("recent");
+  const [accountFilter, setAccountFilter] = useState<string>("");
+  const [orders, setOrders] = useState<ControlPlaneOrder[]>([]);
+  const [executors, setExecutors] = useState<ControlPlaneExecutor[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [accountModes, setAccountModes] = useState<Record<string, string>>({});
+  const requestId = useRef(0);
+  const filtersRef = useRef({ stateFilter, accountFilter });
+  filtersRef.current = { stateFilter, accountFilter };
+  const [query, setQuery] = useState("");
+  useEffect(()=>{const strategy=new URLSearchParams(window.location.search).get("strategy");if(strategy)setQuery(strategy);},[]);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [accountError, setAccountError] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const selected = useMemo(
+    () => orders.find((o) => o.order_id === selectedId) ?? null,
+    [orders, selectedId],
+  );
+
+  const STATE_LABELS: { value: OrderState; label: string; tone: "neutral" | "ok" | "warn" | "danger" | "brand" }[] = [
+    { value: "active", label: t("stateActive"), tone: "ok" },
+    { value: "recent", label: t("stateRecent"), tone: "brand" },
+    { value: "cached", label: t("stateCached"), tone: "neutral" },
+    { value: "lost", label: t("stateLost"), tone: "danger" },
+  ];
+
+  async function load() {
+    const id = ++requestId.current;
+    const scope = filtersRef.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const [ordersRes, executorsRes, accountsRes] = await Promise.all([
+        clientApi.controlOrdersList({
+          state: scope.stateFilter,
+          account_id: scope.accountFilter || undefined,
+          limit: 200,
+        }),
+        clientApi.controlExecutorsList({
+          state: scope.stateFilter === "lost" ? "recent" : "active",
+          account_id: scope.accountFilter || undefined,
+          limit: 100,
+        }),
+        clientApi.accountsList().catch(() => null),
+      ]);
+      if (id !== requestId.current) return;
+      setHasLoaded(true);
+      setAccountError(accountsRes === null);
+      setOrders(ordersRes.orders || []);
+      setExecutors(executorsRes.executors || []);
+      const modes: Record<string, string> = {};
+      for (const a of accountsRes?.accounts || []) {
+        modes[a.profile.id] = a.profile.mode;
+      }
+      if (accountsRes) setAccountModes(modes);
+    } catch (e) {
+      if (id === requestId.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (id === requestId.current) setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    setOrders([]); setExecutors([]); setSelectedId(null); setHasLoaded(false);
+    void load();
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") void load();
+    }, 15_000);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      requestId.current += 1;
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stateFilter, accountFilter]);
+
+  async function cancelOrder(order: ControlPlaneOrder) {
+    const ok = await confirmDialog({
+      message: t("cancelOrderConfirm", {
+        orderId: order.order_id,
+        market: order.market,
+        side: order.side,
+      }),
+      tone: "warning",
+    });
+    if (!ok) return;
+    setActionError(null);
+    setBusy(order.order_id);
+    try {
+      await clientApi.controlOrderCancel({
+        order_id: order.order_id,
+        operator: "dashboard",
+        reason: "operator_cancel",
+      });
+      await load();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function cancelExecutor(exec: ControlPlaneExecutor) {
+    const ok = await confirmDialog({
+      message: t("cancelExecutorConfirm", {
+        executorId: exec.executor_id,
+        market: exec.market,
+      }),
+      tone: "warning",
+    });
+    if (!ok) return;
+    setActionError(null);
+    setBusy(exec.executor_id);
+    try {
+      await clientApi.controlExecutorCancel({
+        executor_id: exec.executor_id,
+        operator: "dashboard",
+        reason: "operator_cancel",
+      });
+      await load();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const accountIds = useMemo(() => {
+    const ids = new Set<string>(Object.keys(accountModes));
+    for (const o of orders) ids.add(o.account_id);
+    for (const e of executors) ids.add(e.account_id);
+    return Array.from(ids).sort();
+  }, [orders, executors, accountModes]);
+
+  const filteredOrders = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return orders.filter((order) => !needle || [order.order_id, order.account_id, order.market, order.strategy_id, order.executor_id].some((value) => String(value || "").toLocaleLowerCase().includes(needle)));
+  }, [orders, query]);
+  const orderPage = useListPage(filteredOrders, stateFilter + ":" + accountFilter + ":" + query);
+  const executorPage = useListPage(executors, stateFilter + ":" + accountFilter);
+  const totals = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const o of orders) counts[o.state] = (counts[o.state] || 0) + 1;
+    return counts;
+  }, [orders]);
+
+  return (
+    <div>
+      <PageHeader
+        title={t("title")}
+        description={t("description")}
+        actions={
+          <button
+            onClick={load}
+            disabled={loading}
+            className="btn-ghost text-xs"
+          >
+            {loading ? tCommon("refreshing") : tCommon("refresh")}
+          </button>
+        }
+      />
+      <SectionTabs section="trading" />
+      <PageBody>
+        {error && <ErrorBanner error={error} onRetry={() => void load()} />}
+        <ErrorBanner error={actionError} />
+
+        <div className="flex flex-wrap items-end gap-x-8 gap-y-3 px-1">
+          <Kpi
+            inline
+            label={t("kpiActiveOrders")}
+            value={`${(totals.open || 0) + (totals.submitted || 0) + (totals.partially_filled || 0)}`}
+            tone="brand"
+          />
+          <Kpi
+            inline
+            label={t("kpiFilled")}
+            value={`${totals.filled || 0}`}
+            tone="ok"
+          />
+          <Kpi
+            inline
+            label={t("kpiLostCanceled")}
+            value={`${(totals.lost || 0) + (totals.canceled || 0)}`}
+            tone={(totals.lost || 0) > 0 ? "danger" : "neutral"}
+          />
+          <Kpi
+            inline
+            label={t("kpiActiveExecutors")}
+            value={`${executors.filter((e) => e.state === "running" || e.state === "pending" || e.state === "submitted").length}`}
+            tone="warn"
+          />
+        </div>
+
+        <div className="flex flex-wrap gap-2 items-center text-[12px] border-b border-brand-500/10 pb-3">
+          <span className="text-ink-500">{t("stateLabel")}</span>
+          <FilterBar label={t("stateLabel")} value={stateFilter} onChange={setStateFilter} options={STATE_LABELS} />
+          <span className="ml-4 text-ink-500">{t("accountLabel")}</span>
+          <div className="w-full min-w-0 sm:w-56">
+            <Select
+              value={accountFilter || ""}
+              onChange={(value) => setAccountFilter(value)}
+              options={[
+                { value: "", label: t("accountAll") },
+                ...accountIds.map((id) => ({ value: id, label: id })),
+              ]}
+              size="sm"
+              ariaLabel={t("accountLabel")}
+            />
+          </div>
+        </div>
+
+        {accountError && <p role="status" className="text-sm text-warn">{t("accountLoadError")}</p>}
+        <SearchField value={query} onChange={setQuery} label={t("searchPlaceholder")} />
+        <Card
+          title={t("ordersTitle", { count: filteredOrders.length })}
+          description={t("ordersDescription")}
+        >
+          {loading && !hasLoaded ? <LoadingState label={t("loadingOrders")} /> : error && !hasLoaded ? null : filteredOrders.length === 0 ? (
+            <Empty label={t("noOrdersMatch")} action={query ? <button type="button" className="btn btn-ghost" onClick={() => setQuery("")}>{t("clearSearch")}</button> : undefined} />
+          ) : (
+            <TableViewport label={t("ordersTitle", { count: filteredOrders.length })}>
+              <table className="table w-full">
+                <thead>
+                  <tr className="text-[11px] text-ink-400">
+                    {/* 8 columns (was 12): side+type merged, size+fill merged,
+                        strategy/executor moved down to the detail card (which
+                        already carries both fields). */}
+                    <th>{t("colState")}</th>
+                    <th>{t("colAccount")}</th>
+                    <th>{t("colMarket")}</th>
+                    <th>{tEnum("sideType")}</th>
+                    <th className="text-right">{tEnum("sizeFilled")}</th>
+                    <th className="text-right">{t("colAvgPrice")}</th>
+                    <th>{t("colAge")}</th>
+                    <th><span className="sr-only">{t("inspect")}</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {orderPage.rows.map((o) => {
+                    const filledNum = Number(o.filled_size || 0);
+                    const sizeNum = Number(o.size_base || 0);
+                    const fillPct =
+                      sizeNum > 0 ? Math.min(100, (filledNum / sizeNum) * 100) : 0;
+                    return (
+                      <tr
+                        key={o.order_id}
+                        onClick={() => setSelectedId(o.order_id)}
+                        className={`text-xs cursor-pointer ${
+                          selectedId === o.order_id ? "bg-brand-500/10" : ""
+                        }`}
+                      >
+                        <td>
+                          <Pill tone={orderStateTone(o.state)}>
+                            {enumLabel(ORDER_STATUS_KEYS, o.state, tEnum)}
+                          </Pill>
+                        </td>
+                        <td className="font-mono">
+                          <span className="flex items-center gap-1.5 whitespace-nowrap">
+                            {o.account_id}
+                            <ModePill mode={accountModes[o.account_id]} />
+                          </span>
+                        </td>
+                        <td className="font-mono">{o.market}</td>
+                        <td>
+                          {/* Side as the colour-coded Pill, type as a muted
+                              suffix — one column instead of two. */}
+                          <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                            <Pill
+                              tone={
+                                String(o.side).toLowerCase() === "sell"
+                                  ? "danger"
+                                  : "ok"
+                              }
+                            >
+                              {enumLabel(ORDER_SIDE_KEYS, String(o.side), tEnum)}
+                            </Pill>
+                            <span className="text-[11px] text-ink-400">
+                              {enumLabel(ORDER_TYPE_KEYS, o.order_type, tEnum)}
+                            </span>
+                          </span>
+                        </td>
+                        <td className="text-right font-mono tabular-nums">
+                          {/* Size with the fill progress underneath (count +
+                              percent + mini bar) — was two columns. */}
+                          <div>{num(sizeNum)}</div>
+                          {sizeNum > 0 ? (
+                            <>
+                              <div className="text-[10px] text-ink-500">
+                                {num(filledNum)} / {num(sizeNum)}
+                                {fillPct > 0 && fillPct < 100
+                                  ? ` · ${fillPct.toFixed(1)}%`
+                                  : null}
+                              </div>
+                              <div className="ml-auto mt-0.5 h-0.5 w-14 overflow-hidden rounded-full bg-ink-900">
+                                <div
+                                  className={`h-full rounded-full transition-[width] duration-300 ${
+                                    fillPct >= 100 ? "bg-ok" : "bg-brand-500/70"
+                                  }`}
+                                  style={{ width: `${fillPct.toFixed(1)}%` }}
+                                />
+                              </div>
+                            </>
+                          ) : null}
+                        </td>
+                        <td className="text-right font-mono tabular-nums">
+                          {num(o.avg_price, 4)}
+                        </td>
+                        <td className="font-mono text-ink-400">
+                          {ageMs(o.created_at)}
+                        </td>
+                        <td>
+                          {/* Buttons live in a div inside the td — display:flex
+                              on a td breaks table-cell layout semantics. */}
+                          <div className="flex gap-1">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedId(o.order_id);
+                            }}
+                            aria-label={`${t("inspect")} ${o.order_id}`}
+                            className="btn btn-ghost text-xs"
+                          >
+                            {t("inspect")}
+                          </button>
+                          {(o.state === "open" ||
+                            o.state === "submitted" ||
+                            o.state === "partially_filled") && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void cancelOrder(o);
+                              }}
+                              disabled={busy !== null}
+                              className="btn-ghost text-[11px] py-0.5 text-danger"
+                            >
+                              {busy === o.order_id ? "…" : t("cancel")}
+                            </button>
+                          )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </TableViewport>
+          )}
+          <Pagination {...orderPage} />
+          {hasLoaded && <p className="mt-3 text-xs text-[color:var(--text-muted)]">{t("loadedLimit")}</p>}
+        </Card>
+
+        <Advanced
+          title={t("executorsTitle", { count: executors.length })}
+          description={t("executorsDescription")}
+          count={executors.length || undefined}
+          storageKey="nerya.orders.advanced.executors"
+        >
+          {executors.length === 0 ? (
+            <Empty label={t("noExecutors")} />
+          ) : (
+            <TableViewport label={t("executorsTitle", { count: executors.length })}>
+              <table className="table w-full">
+                <thead>
+                  <tr className="text-[11px] text-ink-400">
+                    <th>{t("colState")}</th>
+                    <th>{t("colKind")}</th>
+                    <th>{t("colAccount")}</th>
+                    <th>{t("colStrategy")}</th>
+                    <th>{t("colMarket")}</th>
+                    <th>{t("colCreated")}</th>
+                    <th>{t("colLastHeartbeat")}</th>
+                    <th className="text-right">{t("colOrders")}</th>
+                    <th>{t("colExecutorId")}</th>
+                    <th><span className="sr-only">{t("inspect")}</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {executorPage.rows.map((e) => (
+                    <tr key={e.executor_id} className="text-xs">
+                      <td>
+                        <Pill tone={executorStateTone(e.state)}>
+                          {enumLabel(EXECUTOR_STATE_KEYS, e.state, tEnum)}
+                        </Pill>
+                      </td>
+                      <td>{enumLabel(EXECUTOR_KIND_KEYS, e.kind, tEnum)}</td>
+                      <td className="font-mono">{e.account_id}</td>
+                      <td className="font-mono text-ink-300">
+                        {e.strategy_id}
+                      </td>
+                      <td className="font-mono">{e.market}</td>
+                      <td className="font-mono text-ink-400">
+                        {fmtTs(e.created_at)}
+                      </td>
+                      <td className="font-mono text-ink-400">
+                        {fmtTs(e.last_heartbeat)}
+                      </td>
+                      <td className="font-mono text-ink-400 text-right tabular-nums">
+                        {(e.order_ids || []).length}
+                      </td>
+                      <td className="font-mono text-ink-400 truncate max-w-[160px]">
+                        {e.executor_id}
+                      </td>
+                      <td>
+                        {(e.state === "running" ||
+                          e.state === "pending" ||
+                          e.state === "submitted") && (
+                          <button
+                            onClick={() => cancelExecutor(e)}
+                            disabled={busy !== null}
+                            className="btn-ghost text-[11px] py-0.5 text-danger"
+                          >
+                            {busy === e.executor_id ? "…" : t("cancel")}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </TableViewport>
+          )}
+          <Pagination {...executorPage} />
+        </Advanced>
+
+        {selected ? (
+          <ModalFrame title={t("orderDetailTitle", { orderId: selected.order_id })} side="right" width="48rem" onClose={() => setSelectedId(null)}>
+            <Card
+              title={t("orderDetailTitle", { orderId: selected.order_id })}
+              description={`${selected.market} · ${enumLabel(ORDER_SIDE_KEYS, selected.side, tEnum)} ${enumLabel(ORDER_TYPE_KEYS, selected.order_type, tEnum)}`}
+              actions={
+                <button
+                  onClick={() => setSelectedId(null)}
+                  className="btn-ghost text-xs"
+                >
+                  {tCommon("close")}
+                </button>
+              }
+            >
+              <OrderDetail
+                order={selected}
+                mode={accountModes[selected.account_id]}
+              />
+            </Card>
+          </ModalFrame>
+        ) : null}
+      </PageBody>
+    </div>
+  );
+}
+
+function OrderDetail({
+  order,
+  mode,
+}: {
+  order: ControlPlaneOrder;
+  mode?: string;
+}) {
+  const t = useTranslations("orders");
+  const tEnum = useTranslations("ordersPage");
+  const filled = Number(order.filled_size || 0);
+  const size = Number(order.size_base || 0);
+  const remaining = Math.max(0, size - filled);
+  const fillPct = size > 0 ? Math.min(100, (filled / size) * 100) : 0;
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <DetailStat
+          label={t("detailStateLabel")}
+          value={
+            <Pill tone={orderStateTone(order.state)}>
+              {enumLabel(ORDER_STATUS_KEYS, order.state, tEnum)}
+            </Pill>
+          }
+        />
+        <DetailStat
+          label={t("detailSideTypeLabel")}
+          value={
+            <span className="font-mono text-ink-100 text-[12px]">
+              {enumLabel(ORDER_SIDE_KEYS, order.side, tEnum)} ·{" "}
+              {enumLabel(ORDER_TYPE_KEYS, order.order_type, tEnum)}
+            </span>
+          }
+        />
+        <DetailStat
+          label={t("detailAvgPriceLabel")}
+          value={<span className="font-mono text-ink-100 text-[12px]">{num(order.avg_price, 4)}</span>}
+        />
+        <DetailStat
+          label={t("detailFillLabel")}
+          value={
+            <div className="space-y-1">
+              <div className="font-mono text-ink-100 text-[12px]">
+                {num(filled)} <span className="text-ink-500">/ {num(size)}</span>
+                {fillPct > 0 && fillPct < 100 ? (
+                  <span className="text-ink-500"> · {fillPct.toFixed(1)}%</span>
+                ) : null}
+              </div>
+              <div className="h-1.5 rounded-full bg-ink-900 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-brand-500/70 transition-[width] duration-300"
+                  style={{ width: `${fillPct.toFixed(1)}%` }}
+                />
+              </div>
+              {remaining > 0 ? (
+                <div className="text-[10px] text-ink-500 font-mono">
+                  {t("detailRemaining", { value: num(remaining) })}
+                </div>
+              ) : null}
+            </div>
+          }
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <DetailGroup title={t("detailIdentity")}>
+          <DetailRow label={t("detailRowOrderId")} value={order.order_id} mono />
+          {order.client_order_id ? (
+            <DetailRow label={t("detailRowClientOrderId")} value={order.client_order_id} mono />
+          ) : null}
+          {order.exchange_order_id ? (
+            <DetailRow label={t("detailRowExchangeOrderId")} value={order.exchange_order_id} mono />
+          ) : null}
+          <DetailRow
+            label={t("detailRowAccount")}
+            value={
+              <span className="inline-flex items-center gap-1.5">
+                {order.account_id}
+                <ModePill mode={mode} />
+              </span>
+            }
+            mono
+          />
+          <DetailRow label={t("detailRowMarket")} value={order.market} mono />
+          {order.strategy_id ? (
+            <DetailRow label={t("detailRowStrategy")} value={order.strategy_id} mono />
+          ) : null}
+          {order.executor_id ? (
+            <DetailRow label={t("detailRowExecutor")} value={order.executor_id} mono />
+          ) : null}
+          {order.intent_id ? (
+            <DetailRow label={t("detailRowIntent")} value={order.intent_id} mono />
+          ) : null}
+          {order.plan_id ? (
+            <DetailRow label={t("detailRowPlan")} value={order.plan_id} mono />
+          ) : null}
+        </DetailGroup>
+
+        <DetailGroup title={t("detailTimeline")}>
+          <DetailRow label={t("detailRowCreated")} value={fmtTs(order.created_at)} mono />
+          {order.submitted_at ? (
+            <DetailRow label={t("detailRowSubmitted")} value={fmtTs(order.submitted_at)} mono />
+          ) : null}
+          {order.last_seen_at ? (
+            <DetailRow label={t("detailRowLastSeen")} value={fmtTs(order.last_seen_at)} mono />
+          ) : null}
+          {order.terminal_at ? (
+            <DetailRow label={t("detailRowTerminal")} value={fmtTs(order.terminal_at)} mono />
+          ) : null}
+          <DetailRow label={t("detailRowAge")} value={ageMs(order.created_at)} mono />
+        </DetailGroup>
+      </div>
+
+      <details>
+        <summary className="cursor-pointer text-[12px] text-ink-500 font-medium hover:text-ink-300">
+          {t("detailRawEnvelope")}
+        </summary>
+        <div className="mt-2">
+          <JsonView value={order} initialCollapsed showRawToggle />
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function DetailStat({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 px-3 py-2">
+      <div className="text-[11px] text-ink-500 font-medium">{label}</div>
+      <div className="mt-1.5">{value}</div>
+    </div>
+  );
+}
+
+function DetailGroup({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 px-3 py-2">
+      <div className="text-[11px] text-ink-500 font-medium mb-2">{title}</div>
+      <dl className="space-y-1">{children}</dl>
+    </div>
+  );
+}
+
+function DetailRow({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: React.ReactNode;
+  mono?: boolean;
+}) {
+  return (
+    <div className="grid grid-cols-[110px_minmax(0,1fr)] items-baseline gap-2 text-[11px]">
+      <dt className="text-ink-500">{label}</dt>
+      <dd className={`min-w-0 break-words text-ink-100 ${mono ? "font-mono" : ""}`}>{value}</dd>
+    </div>
+  );
+}

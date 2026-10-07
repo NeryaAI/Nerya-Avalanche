@@ -1,0 +1,244 @@
+"""Strategy-scoped subagent registry.
+
+The global :func:`nerya.subagents.registry.load_registry` returns
+operator-defined ``*.agent.md`` prompts under ``workspace/subagents/``.
+That is the wrong scope for agent-generated strategies: each
+strategy package ships its own subagent prompts under
+``workspace/strategies/<strategy_id>/subagents/<name>.agent.md`` and
+the runner must resolve those *first* so two strategies can ship a
+``market_analyst`` subagent with different prompts without colliding.
+
+This module owns the resolution policy:
+
+1. If ``strategy_id`` is provided and the package declares the
+   subagent in its manifest, the strategy-local prompt wins.
+2. A tuning subagent with no strategy-local file uses the built-in
+   ``strategy_tuner`` prompt and never reads the global registry.
+3. Other roles fall back to the global ``workspace/subagents`` registry.
+4. If neither has the prompt, a :class:`SubAgentSpec` is synthesised:
+   a canonical default profile when the name maps to one, otherwise a
+   *capable generic* researcher/analyst body + safe read-only skills so
+   a role the lead agent invented on the fly still does real work
+   instead of running blank.
+
+``allowed_skills`` and ``tier`` are still resolved by name through
+the same defaults the global registry uses; per-strategy overrides
+will be added in alongside the tuning config.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+from ..core.errors import TradingError
+from ..core.paths import WorkspacePaths
+from ..strategies.package import (
+    StrategyPackage,
+    load_package,
+    resolve_package_relative_path,
+)
+from .registry import (
+    DEFAULT_SUBAGENT_PROMPTS,
+    DEFAULT_SUBAGENT_SKILLS,
+    DEFAULT_TIERS,
+    GENERIC_ADHOC_SKILLS,
+    SubAgentSpec,
+    canonical_subagent_name,
+    default_execution_policy,
+    generic_role_prompt,
+    load_registry,
+)
+
+
+@dataclass
+class StrategySubAgentRegistry:
+    """Per-strategy subagent resolver.
+
+    Construct one per ``strategy_id`` per run. The dispatcher caches a
+    single instance per :class:`SubAgentDispatcher` and re-creates it
+    when ``strategy_id`` changes, so we don't keep stale package
+    references after a hot promotion.
+    """
+
+    paths: WorkspacePaths
+    strategy_id: Optional[str] = None
+    _package: Optional[StrategyPackage] = field(default=None, init=False, repr=False)
+    _global: Optional[dict[str, SubAgentSpec]] = field(
+        default=None, init=False, repr=False
+    )
+
+    def _load_global(self) -> dict[str, SubAgentSpec]:
+        if self._global is None:
+            self._global = load_registry(self.paths)
+        return self._global
+
+    def _load_package(self) -> Optional[StrategyPackage]:
+        if not self.strategy_id:
+            return None
+        if self._package is None:
+            try:
+                self._package = load_package(self.paths, self.strategy_id)
+            except TradingError:
+                self._package = None
+        return self._package
+
+    def _strategy_prompt_path(self, name: str) -> Optional[Path]:
+        pkg = self._load_package()
+        if pkg is None:
+            return None
+        if name not in pkg.manifest.subagents:
+            return None
+        resolved = resolve_package_relative_path(pkg, f"subagents/{name}.agent.md")
+        if resolved is None:
+            return None
+        path, _relative_path = resolved
+        return path if path.exists() else None
+
+    def _strategy_tier(self, name: str) -> str:
+        canonical = canonical_subagent_name(name)
+        pkg = self._load_package()
+        if pkg is not None:
+            tuning = pkg.manifest.tuning
+            if tuning.enabled and name == tuning.subagent.name:
+                tier = str(tuning.subagent.tier or "").strip()
+                if tier:
+                    return tier
+            tier = str(pkg.manifest.llm_policy.default_tier or "").strip()
+            if tier:
+                return tier
+        return DEFAULT_TIERS.get(canonical, "medium")
+
+    def get(self, name: str) -> SubAgentSpec:
+        pkg = self._load_package()
+        if (
+            pkg is not None
+            and pkg.manifest.tuning.enabled
+            and name == pkg.manifest.tuning.subagent.name
+        ):
+            return build_strategy_tuner_spec(pkg)
+        canonical = canonical_subagent_name(name)
+        path = self._strategy_prompt_path(name)
+        if path is not None:
+            return SubAgentSpec.load(
+                path,
+                name=name,
+                allowed_skills=list(DEFAULT_SUBAGENT_SKILLS.get(canonical, [])),
+                tier=self._strategy_tier(name),
+                canonical_name=canonical,
+                execution_policy=default_execution_policy(canonical),
+            )
+        spec = self._load_global().get(name)
+        if spec is not None:
+            # Even when ``<name>.agent.md`` exists it may be blank. Fall back
+            # to the default body in that case so the model never runs with
+            # an empty role prompt.
+            if not (spec.prompt or "").strip():
+                spec.prompt = DEFAULT_SUBAGENT_PROMPTS.get(
+                    spec.canonical_name or canonical,
+                    spec.prompt,
+                )
+            return spec
+        # Ship a default prompt body so the role still has scope and an
+        # output contract even when no file exists on disk. Operators can
+        # override it by writing ``workspace/subagents/<name>.agent.md``.
+        #
+        # For a brand-new role name the lead agent invented (no workspace
+        # file, no canonical default), fall back to a *capable generic*
+        # researcher/analyst spec instead of a blank prompt + empty skill
+        # list. That lets the main agent spin up a temporary role on demand
+        # (``team_run`` / ``subagent_run`` with a novel name) and still get
+        # real work done, rather than being forced to reuse a registered
+        # role or persist one first.
+        # Preserve the canonical default prompt verbatim when one exists
+        # (callers/tests compare it byte-for-byte); only synthesise the
+        # generic body when the canonical profile has no prompt at all.
+        canonical_prompt = DEFAULT_SUBAGENT_PROMPTS.get(canonical, "") or ""
+        prompt = canonical_prompt if canonical_prompt.strip() else generic_role_prompt(name)
+        allowed = list(DEFAULT_SUBAGENT_SKILLS.get(canonical, []))
+        if not allowed:
+            allowed = list(GENERIC_ADHOC_SKILLS)
+        return SubAgentSpec(
+            name=name,
+            prompt_path=self.paths.subagents / f"{name}.agent.md",
+            prompt=prompt,
+            allowed_skills=allowed,
+            tier=DEFAULT_TIERS.get(canonical, "medium"),
+            canonical_name=canonical,
+            execution_policy=default_execution_policy(canonical),
+        )
+
+    def list_names(self) -> list[str]:
+        names = set(self._load_global().keys())
+        pkg = self._load_package()
+        if pkg is not None:
+            names.update(pkg.manifest.subagents)
+            if pkg.manifest.tuning.enabled:
+                names.add(pkg.manifest.tuning.subagent.name)
+        return sorted(names)
+
+
+def resolve_spec(
+    paths: WorkspacePaths,
+    name: str,
+    *,
+    strategy_id: Optional[str] = None,
+) -> SubAgentSpec:
+    """Convenience wrapper for callers that don't want to keep the registry."""
+
+    return StrategySubAgentRegistry(paths=paths, strategy_id=strategy_id).get(name)
+
+
+def build_strategy_tuner_spec(
+    package: StrategyPackage,
+    *,
+    package_context: dict[str, Any] | None = None,
+) -> SubAgentSpec:
+    """Resolve a tuner prompt from package-local or already-frozen content."""
+
+    tuning = package.manifest.tuning
+    resolved = resolve_package_relative_path(package, tuning.subagent.prompt_file)
+    prompt_path = package.root / "subagents" / "strategy_tuner.agent.md"
+    prompt = DEFAULT_SUBAGENT_PROMPTS["strategy_tuner"]
+    if resolved is not None:
+        prompt_path, relative_path = resolved
+        if package_context is not None:
+            tuner_prompt = (
+                package_context.get("tuner_prompt")
+                if isinstance(package_context.get("tuner_prompt"), dict)
+                and package_context["tuner_prompt"].get("path") == relative_path
+                else None
+            )
+            files = (
+                package_context.get("files")
+                if isinstance(package_context.get("files"), dict)
+                else {}
+            )
+            frozen = files.get(relative_path) if tuner_prompt is not None else None
+            content = frozen.get("content") if isinstance(frozen, dict) else None
+            if isinstance(content, str) and content.strip():
+                prompt = content
+        elif prompt_path.is_file():
+            try:
+                content = prompt_path.read_text(encoding="utf-8")
+            except OSError:
+                content = ""
+            if content.strip():
+                prompt = content
+    return SubAgentSpec(
+        name=tuning.subagent.name,
+        prompt_path=prompt_path,
+        prompt=prompt,
+        allowed_skills=list(DEFAULT_SUBAGENT_SKILLS.get("strategy_tuner", [])),
+        tier=str(tuning.subagent.tier or "medium"),
+        canonical_name="strategy_tuner",
+        execution_policy=default_execution_policy("strategy_tuner"),
+    )
+
+
+__all__ = [
+    "StrategySubAgentRegistry",
+    "build_strategy_tuner_spec",
+    "resolve_spec",
+]

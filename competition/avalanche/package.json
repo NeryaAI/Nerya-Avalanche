@@ -1,0 +1,22 @@
+{
+  "name": "@nerya/avalanche-competition",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "compile": "node scripts/compile.mjs",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
+    "start": "node server.mjs",
+    "preflight": "node scripts/preflight.mjs",
+    "fuji": "node scripts/fuji.mjs"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "5.1.0",
+    "ethers": "6.17.0"
+  },
+  "devDependencies": {
+    "ganache": "7.9.2",
+    "pptxgenjs": "3.12.0",
+    "solc": "0.8.28"
+  }
+}

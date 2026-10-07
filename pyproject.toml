@@ -1,0 +1,99 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nerya"
+version = "1.0.0b1"
+description = "Skill-first, trading-native, self-evolving autonomous agent runtime"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Nerya" }]
+license = { file = "LICENSE" }
+dependencies = [
+    "pyyaml>=6.0",
+    "pydantic>=2.5",
+    "cryptography>=41.0",
+    "httpx>=0.27",
+    "websockets>=15,<16",
+    "typer>=0.12",
+    "rich>=13.7",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "jsonschema>=4.21",
+    "trafilatura>=1.8",
+    "markdownify>=0.11",
+    # Scientific stack used by the in-process backtest engine and
+    # indicator math: the backtest loads a strategy's main.py in this
+    # interpreter, and generated strategies routinely ``import numpy`` /
+    # ``import pandas``. Declaring them here keeps `uv sync` (the
+    # installer path) from omitting them, which otherwise surfaces as
+    # "backtest failed: ModuleNotFoundError: No module named 'numpy'".
+    "numpy>=1.26",
+    "pandas>=2.0",
+    # PDF text extraction for the research fetch chain (fetch_url.py):
+    # company filings / annual reports / IR decks are routinely PDF and
+    # must enter the evidence chain as text, not mojibake.
+    "pypdf>=4.0",
+]
+
+[project.optional-dependencies]
+# Opt-in desktop runtime; install its binary explicitly with playwright install chromium.
+browser = ["playwright>=1.58,<2"]
+# Keep the supported v1 protocol API explicit; normal CLI needs no MCP SDK.
+mcp = ["mcp>=1.28,<2"]
+dev = [
+    "build>=1.2",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+trading = [
+    # Keep the credential schema stable until the BitMart uid contract is
+    # explicitly reviewed against the upstream CCXT release.
+    "ccxt>=4.4,<4.5.65",
+    "eth-account>=0.13",
+    "eth-abi>=5.0",
+    "msgpack>=1.0",
+    "pynacl>=1.5",
+    "base58>=2.1",
+]
+prediction = ["polymarket-client==0.12.0"]
+
+[project.scripts]
+nerya = "nerya.cli.app:main"
+
+[tool.setuptools.packages.find]
+where = [".", "sdk/python"]
+include = ["nerya*", "nerya_sdk*"]
+exclude = ["tests*", "dashboard*", "workspace_template*", "sdk.typescript*"]
+
+[tool.setuptools.package-data]
+nerya = [
+    "agent/route_manifest_presets/*.yml",
+    "skills/builtin/**/*.md",
+    "skills/builtin/**/*.yml",
+    "skills/builtin/**/*.yaml",
+    "skills/builtin/**/*.json",
+    "skills/builtin/**/*.js",
+    "skills/builtin/**/*.txt",
+    "skills/builtin/**/*.csv",
+    "skills/builtin/**/*.j2",
+    "wallet/providers/templates/*.js",
+    "workspace/_prompt_bundles/**/*.md",
+    "workspace/_prompt_bundles/**/*.json",
+    "workspace/_prompt_bundles/**/*.yml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "sdk/python"]
+# Default to the smoke-marked suite so local `pytest` runs are fast; this
+# silently DESELECTS the integration/profile-marked tests (~65 of ~2265).
+# CI's regression job runs `pytest -m ""` (empty filter selects everything).
+addopts = "-m smoke"
+markers = [
+    "smoke: curated end-to-end smoke suite (default)",
+    "integration: opt-in checks that may touch real external services",
+    "profile: per-profile gate (unit_mock | strict_runtime | live_opt_in)",
+]

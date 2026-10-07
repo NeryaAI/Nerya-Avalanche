@@ -1,0 +1,86 @@
+id: avax_breakout_zh
+title: AVAX 日线突破
+description: AVAX 日线20日高点突破入场、10日低点跌破退出的现货多头策略；执行目标为 Avalanche 主网 LFJ USDC/WAVAX，回测以
+  BINANCE:AVAXUSDT 为价格代理。
+mode: paper
+execution_mode: script
+agent_task:
+  enabled: false
+timeframe: 1d
+markets:
+- BINANCE:AVAXUSDT
+accounts:
+- paper_main
+schedule:
+  type: cron
+  cron: 0 0 * * *
+  timezone: UTC
+  enabled: false
+params:
+  entry_days: 20
+  exit_days: 10
+  breakout_buffer_pct: 0.0
+  sizing:
+    method: pct_nav
+    pct_nav: 0.85
+policy:
+  max_single_order_usd: 0
+  max_daily_notional_usd: 0.0
+  max_open_positions: 1
+  min_confidence: 0.6
+  allow_direct_order: true
+  require_subagent_before_order: false
+  default_order_usd: 0.0
+  max_run_seconds: 60
+  max_sdk_calls_per_run: 64
+  max_subagent_calls_per_run: 4
+  allow_short: false
+  leverage: 1
+  max_daily_loss_usd: 0
+backtest:
+  tf: 1d
+  start_utc: '2026-04-01'
+  end_utc: '2026-10-07'
+  initial_capital_usd: 10000
+  warmup_bars: 90
+  fee_bps_by_venue:
+    BINANCE: 30
+  slip_bps_by_venue:
+    BINANCE: 10
+  max_drawdown_pct: 25
+  allow_short: false
+  max_open_trades: 1
+  coverage_policy: strict
+  stake_amount:
+    mode: unlimited
+tuning:
+  enabled: false
+  schedule:
+    type: cron
+    cron: 0 9 * * 1
+    timezone: Asia/Shanghai
+    enabled: false
+  lookback:
+    runs: 200
+    max_age_hours: 168
+    min_closed_trades: 10
+  review_plan:
+    scope: 仅本策略 avax_breakout_zh、选定包哈希、paper 模式与请求区间（2026-04-01至2026-10-07 UTC）内做独立复盘。
+    focus: 低样本数（历史仅约2笔完整交易）、日线突破噪声、最大回撤与手续费/滑点成本对净收益的影响。
+    validation_plan: 任何修订必须创建新候选，并在同一区间、同费用口径、同数据源下复测；比较买卖持有基准与覆盖率，检查泄漏。
+    next_review: 先积累足够完整交易样本再评估规则修改；若滑点/费用主导损耗，优先复盘执行成本而非改信号。
+    steps: 独立暂停流程：脚本整理证据（runs/成交/成本/回撤归因）→ 智能体基于证据提出修订或维持不变；本计划当前为暂停状态，不启用任何调度。
+version: 1
+strategy_id: avax_breakout_zh
+entrypoint: main.py:run
+strategy_class: trend
+trigger_kinds:
+- schedule
+llm_policy:
+  default_tier: medium
+  allowed_tiers:
+  - light
+  - medium
+  max_calls_per_run: 4
+subagents: []
+news_sources: []

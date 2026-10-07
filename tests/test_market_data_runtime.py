@@ -1,0 +1,2041 @@
+from __future__ import annotations
+
+from copy import deepcopy
+import os
+from types import SimpleNamespace
+
+import pytest
+
+from nerya.agent.kernel import AgentKernel as _AgentKernel  # noqa: F401
+from nerya.connectors.mock_exchange import MockExchange
+from nerya.core import jsonl, yaml_io
+from nerya.core.config import Config, DEFAULT_CONFIG
+from nerya.core.paths import WorkspacePaths
+from nerya.data.candles import discover_market_data_sources, fetch_candles, fetch_public_ticker
+from nerya.strategies.context import StrategyContext, StrategyMarket, StrategyPnL, StrategyPortfolio
+from nerya.strategies.runner import StrategyRunner
+from nerya.tools.native.connectors import market_data_handler
+from nerya.tools.types import ToolCall
+from nerya.trading.virtual_ledger import open_ledger
+
+
+pytestmark = pytest.mark.smoke
+REAL_MARKET_TESTS = os.environ.get("NERYA_REAL_MARKET_TESTS", "").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+REAL_MARKET_CANDIDATES = (
+    "BINANCE:BTCUSDT",
+    "OKX:BTCUSDT",
+    "KRAKEN:BTCUSD",
+)
+
+
+def _config(tmp_path) -> Config:
+    data = deepcopy(DEFAULT_CONFIG)
+    data["runtime"]["mock_mode"] = False
+    cfg = Config(paths=WorkspacePaths(root=tmp_path), data=data)
+    yaml_io.dump(
+        cfg.paths.accounts_file,
+        {
+            "accounts": [
+                {
+                    "id": "paper_main",
+                    "exchange": "mock",
+                    "venue": "mock",
+                    "mode": "paper",
+                    "status": "active",
+                    "initial_balance_usd": 10_000,
+                    "permissions": {"read_balances": True},
+                }
+            ]
+        },
+    )
+    return cfg
+
+
+def _json_payload(result) -> dict:
+    body = result.asdict()
+    assert body["is_error"] is False
+    parts = body["content"]
+    assert parts and parts[0]["type"] == "json"
+    return parts[0]["data"]
+
+
+def _first_live_candles(cfg: Config, *, count: int) -> tuple[str, list[dict]]:
+    for market in REAL_MARKET_CANDIDATES:
+        rows = fetch_candles(
+            market,
+            count=count,
+            interval="1m",
+            allow_mock=False,
+            config_like=cfg,
+        )
+        if rows and rows[0].get("_envelope", {}).get("mode") == "live":
+            return market, rows
+    return REAL_MARKET_CANDIDATES[0], []
+
+
+def test_ranked_universe_defaults_to_binance(monkeypatch) -> None:
+    from nerya.skills.builtin.markets.scripts import ranked_universe as module
+
+    seen: dict[str, object] = {}
+
+    def fake_run(**kwargs):
+        seen.update(kwargs)
+        return {
+            "ok": True,
+            "market_ids": ["BINANCE:BTCUSDT"],
+            "venue_mapping_complete": True,
+            "needs_symbol_validation": False,
+        }
+
+    monkeypatch.setattr(module, "run", fake_run)
+    payload = _json_payload(market_data_handler(ToolCall(
+        name="market_data",
+        arguments={"action": "ranked_universe", "count": 1,
+                   "rank_by": "market_cap", "quote": "USDT"},
+    )))
+    assert seen["venue"] == "binance"
+    assert payload["venue_mapping_complete"] is True
+
+
+def test_mock_exchange_provides_paper_ohlcv_klines() -> None:
+    rows = MockExchange().get_klines("mock:BTC/USDT", interval="5m", limit=12)
+
+    assert len(rows) == 12
+    assert all(len(row) == 6 for row in rows)
+    assert rows[-1][0] > rows[0][0]
+    assert rows[-1][4] > 0
+
+
+def test_strategy_market_features_include_indicators(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    market = StrategyMarket(
+        paths=cfg.paths,
+        accounts=("paper_main",),
+        _registry_factory=lambda: __import__(
+            "nerya.connectors.registry",
+            fromlist=["ConnectorRegistry"],
+        ).ConnectorRegistry(cfg.paths.root),
+    )
+
+    candles = market.candles("mock:BTC/USDT", timeframe="1m", limit=40)
+    klines = market.klines("mock:BTC/USDT", timeframe="1m", limit=40)
+    features = market.features("mock:BTC/USDT", timeframe="1m", lookback=40)
+
+    assert len(candles) == 40
+    assert len(klines) == 40
+    assert features["rows"] == 40
+    assert features["rsi_14"] is not None
+    assert features["macd"]["hist"] is not None
+    assert features["indicator_backend"] in {"pure_python", "talib"}
+
+
+def test_strategy_market_accepts_common_generated_candle_aliases(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    market = StrategyMarket(
+        paths=cfg.paths,
+        accounts=("paper_main",),
+        _registry_factory=lambda: __import__(
+            "nerya.connectors.registry",
+            fromlist=["ConnectorRegistry"],
+        ).ConnectorRegistry(cfg.paths.root),
+    )
+
+    positional = market.candles("mock:BTC/USDT", "1m", 2)
+    keyword_symbol = market.candles(symbol="mock:BTC/USDT", timeframe="1m", limit=2)
+    ohlcv_alias = market.ohlcv("mock:BTC/USDT", interval="1m", count=2)
+
+    assert len(positional) == 2
+    assert len(keyword_symbol) == 2
+    assert len(ohlcv_alias) == 2
+    assert positional[-1]["close"] == keyword_symbol[-1]["close"]
+    assert positional[-1]["close"] == ohlcv_alias[-1]["close"]
+
+
+def test_strategy_context_exposes_common_generated_ohlcv_helpers(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    market = StrategyMarket(
+        paths=cfg.paths,
+        accounts=("paper_main",),
+        _registry_factory=lambda: __import__(
+            "nerya.connectors.registry",
+            fromlist=["ConnectorRegistry"],
+        ).ConnectorRegistry(cfg.paths.root),
+    )
+    ctx = object.__new__(StrategyContext)
+    ctx.market = market
+
+    candles = ctx.ohlcv("mock:BTC/USDT", timeframe="1m", limit=3)
+    closes = ctx.history("mock:BTC/USDT", "1m", "close", length=3)
+
+    assert len(candles) == 3
+    assert [row["close"] for row in candles] == closes
+
+
+def test_strategy_market_ticker_uses_live_public_path_for_prefixed_markets(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cfg = _config(tmp_path)
+
+    def fake_public_ticker(market, *, allow_mock=None, config_like=None):
+        assert market == "yahoo:AAPL"
+        assert allow_mock is False
+        return {
+            "price": 293.32,
+            "last": 293.32,
+            "mid": 293.32,
+            "bid": 293.31,
+            "ask": 293.33,
+            "spread_bps": 0.68,
+            "ts_ms": 1778247000000,
+            "source": "yahoo_rest",
+            "_envelope": {
+                "mode": "live",
+                "source": "yahoo_rest",
+                "venue": "yahoo",
+            },
+        }
+
+    class BadRegistry:
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("non-mock ticker should not use account connector")
+
+    monkeypatch.setattr("nerya.strategies.context.fetch_public_ticker", fake_public_ticker)
+    market = StrategyMarket(
+        paths=cfg.paths,
+        accounts=("paper_main",),
+        _registry_factory=lambda: BadRegistry(),
+    )
+
+    ticker = market.ticker("yahoo:AAPL")
+
+    assert ticker["last"] == 293.32
+    assert ticker["venue"] == "yahoo"
+    assert ticker["_envelope"]["mode"] == "live"
+
+
+def test_fetch_candles_routes_equity_aliases_to_yahoo(tmp_path, monkeypatch) -> None:
+    cfg = _config(tmp_path)
+    seen: dict[str, object] = {}
+
+    def fake_public_rest_klines(venue, market, *, interval, count):
+        seen["venue"] = venue
+        seen["market"] = market
+        seen["interval"] = interval
+        seen["count"] = count
+        return [
+            {"ts": 1_777_000_000, "open": 100, "high": 102, "low": 99, "close": 101, "volume": 10}
+        ]
+
+    monkeypatch.setattr("nerya.data.candles._fetch_public_rest_klines", fake_public_rest_klines)
+
+    rows = fetch_candles(
+        "equities:TSLA",
+        count=1,
+        interval="1d",
+        allow_mock=False,
+        config_like=cfg,
+    )
+
+    assert rows
+    assert seen == {
+        "venue": "YAHOO",
+        "market": "YAHOO:TSLA",
+        "interval": "1d",
+        "count": 1,
+    }
+
+
+def test_bybit_perpetual_rest_klines_paginates_backward(monkeypatch) -> None:
+    from urllib.parse import parse_qs, urlparse
+
+    from nerya.data import candles as candles_mod
+
+    calls: list[dict[str, str]] = []
+    hour_ms = 3_600_000
+    batches = [
+        [
+            [str(4 * hour_ms), "104", "105", "103", "104.5", "10"],
+            [str(3 * hour_ms), "103", "104", "102", "103.5", "10"],
+        ],
+        [
+            [str(2 * hour_ms), "102", "103", "101", "102.5", "10"],
+            [str(1 * hour_ms), "101", "102", "100", "101.5", "10"],
+        ],
+    ]
+
+    def fake_http_json(url: str):
+        qs = parse_qs(urlparse(url).query)
+        calls.append({key: values[0] for key, values in qs.items()})
+        rows = batches[len(calls) - 1] if len(calls) <= len(batches) else []
+        return {"result": {"list": rows}}
+
+    monkeypatch.setattr(candles_mod, "_http_json", fake_http_json)
+
+    rows = candles_mod._fetch_public_rest_klines(
+        "BYBIT_PERPETUAL",
+        "BYBIT_PERPETUAL:SOLUSDT",
+        interval="1h",
+        count=4,
+        start=0,
+        end=5 * 3600,
+    )
+
+    assert [row["ts"] for row in rows] == [3600, 7200, 10800, 14400]
+    assert calls[0]["category"] == "linear"
+    assert int(calls[1]["end"]) < int(calls[0]["end"])
+
+
+def test_ccxt_connector_fetches_ohlcv_pages_with_since() -> None:
+    from nerya.connectors.ccxt_adapter import CcxtConnector
+
+    class FakeClient:
+        def __init__(self):
+            self.calls: list[dict[str, int]] = []
+
+        def fetch_ohlcv(self, sym, *, timeframe, since, limit):
+            self.calls.append({"since": int(since), "limit": int(limit)})
+            if len(self.calls) == 1:
+                return [
+                    [0, 100, 101, 99, 100.5, 10],
+                    [60_000, 101, 102, 100, 101.5, 10],
+                ]
+            if len(self.calls) == 2:
+                return [
+                    [120_000, 102, 103, 101, 102.5, 10],
+                    [180_000, 103, 104, 102, 103.5, 10],
+                ]
+            return []
+
+    conn = CcxtConnector(exchange_id="binance", options={"ohlcv_page_limit": 2})
+    conn._client = FakeClient()
+
+    rows = conn.get_klines("BTC/USDT", interval="1m", limit=4, since=0)
+
+    assert [row[0] for row in rows] == [0, 60_000, 120_000, 180_000]
+    assert conn._client.calls == [
+        {"since": 0, "limit": 2},
+        {"since": 120_000, "limit": 2},
+    ]
+
+
+def test_ccxt_connector_uses_auto_pagination_when_available() -> None:
+    from nerya.connectors.ccxt_adapter import CcxtConnector
+
+    class FakeClient:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def fetch_ohlcv(self, sym, *, timeframe, since, limit, params=None):
+            self.calls.append(
+                {
+                    "sym": sym,
+                    "timeframe": timeframe,
+                    "since": since,
+                    "limit": limit,
+                    "params": dict(params or {}),
+                }
+            )
+            if params and params.get("paginate"):
+                return [
+                    [0, 100, 101, 99, 100.5, 10],
+                    [60_000, 101, 102, 100, 101.5, 10],
+                    [120_000, 102, 103, 101, 102.5, 10],
+                    [180_000, 103, 104, 102, 103.5, 10],
+                ]
+            return []
+
+    conn = CcxtConnector(
+        exchange_id="binance",
+        options={"ohlcv_page_limit": 2, "ohlcv_pagination_calls": 2},
+    )
+    conn._client = FakeClient()
+
+    rows = conn.get_klines("BTC/USDT", interval="1m", limit=4, since=0, end=180_000)
+
+    assert [row[0] for row in rows] == [0, 60_000, 120_000, 180_000]
+    assert conn._client.calls[0]["params"]["paginate"] is True
+    assert conn._client.calls[0]["params"]["paginationCalls"] == 2
+    assert conn._client.calls[0]["params"]["maxEntriesPerRequest"] == 2
+
+
+def test_ccxt_connector_falls_back_when_auto_pagination_rejected() -> None:
+    from nerya.connectors.ccxt_adapter import CcxtConnector
+
+    class FakeClient:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def fetch_ohlcv(self, sym, *, timeframe, since, limit, params=None):
+            self.calls.append(
+                {
+                    "sym": sym,
+                    "timeframe": timeframe,
+                    "since": since,
+                    "limit": limit,
+                    "params": dict(params or {}),
+                }
+            )
+            if params and params.get("paginate"):
+                raise RuntimeError("exchange rejected automatic pagination params")
+            if len(self.calls) == 2:
+                return [
+                    [0, 100, 101, 99, 100.5, 10],
+                    [60_000, 101, 102, 100, 101.5, 10],
+                ]
+            if len(self.calls) == 3:
+                return [
+                    [120_000, 102, 103, 101, 102.5, 10],
+                    [180_000, 103, 104, 102, 103.5, 10],
+                ]
+            return []
+
+    conn = CcxtConnector(
+        exchange_id="gate",
+        options={"ohlcv_page_limit": 2, "ohlcv_pagination_calls": 2},
+    )
+    conn._client = FakeClient()
+
+    rows = conn.get_klines("BTC/USDT", interval="1m", limit=4, since=0)
+
+    assert [row[0] for row in rows] == [0, 60_000, 120_000, 180_000]
+    assert conn._client.calls[0]["params"]["paginate"] is True
+    assert conn._client.calls[1]["params"] == {}
+    assert conn._client.calls[2]["since"] == 120_000
+
+
+def test_fetch_candles_tries_direct_ccxt_for_supported_explicit_venue(monkeypatch) -> None:
+    from nerya.connectors import ccxt_adapter
+    from nerya.data import candles as candles_mod
+
+    seen: dict[str, object] = {}
+
+    def fake_public_rest_klines(*_args, **_kwargs):
+        return []
+
+    class FakeCcxtConnector:
+        venue = "PHEMEX"
+
+        def __init__(self, *, exchange_id, venue, live, options):
+            seen["init"] = {
+                "exchange_id": exchange_id,
+                "venue": venue,
+                "live": live,
+                "options": options,
+            }
+
+        def get_klines(self, market, *, interval, limit, since=None, end=None):
+            seen["call"] = {
+                "market": market,
+                "interval": interval,
+                "limit": limit,
+                "since": since,
+                "end": end,
+            }
+            start_ms = 1_700_000_000_000
+            return [
+                [start_ms, 1, 2, 0.5, 1.5, 10],
+                [start_ms + 60_000, 2, 3, 1.5, 2.5, 11],
+            ]
+
+    monkeypatch.setattr(candles_mod, "_fetch_public_rest_klines", fake_public_rest_klines)
+    monkeypatch.setattr(ccxt_adapter, "supported_exchanges", lambda: ["phemex"])
+    monkeypatch.setattr(ccxt_adapter, "CcxtConnector", FakeCcxtConnector)
+
+    rows = fetch_candles(
+        "PHEMEX:BTCUSDT",
+        count=2,
+        interval="1m",
+        allow_mock=False,
+        start=1_700_000_000,
+        end=1_700_000_060,
+    )
+
+    assert seen["init"] == {
+        "exchange_id": "phemex",
+        "venue": "PHEMEX",
+        "live": False,
+        "options": {},
+    }
+    assert seen["call"] == {
+        "market": "PHEMEX:BTCUSDT",
+        "interval": "1m",
+        "limit": 2,
+        "since": 1_700_000_000_000,
+        "end": 1_700_000_060_000,
+    }
+    assert [row["ts"] for row in rows] == [1_700_000_000, 1_700_000_060]
+    assert rows[0]["_envelope"]["connector_id"] == "ccxt"
+
+
+def test_explicit_venue_does_not_fallback_to_other_public_sources(tmp_path, monkeypatch) -> None:
+    cfg = _config(tmp_path)
+    seen_public: list[str] = []
+    seen_connector: list[str] = []
+
+    def fake_public_rest_klines(venue, market, *, interval, count, **_kwargs):
+        del market, interval, count
+        seen_public.append(str(venue).upper())
+        if str(venue).upper() == "BINANCE":
+            return [
+                {"ts": 1_777_000_000, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}
+            ]
+        return []
+
+    class FakeGate:
+        venue = "GATE"
+        connector_id = "fake_gate"
+
+        def get_klines(self, market, *, interval, limit, since=None):
+            del market, interval, limit, since
+            seen_connector.append("GATE")
+            return [[1_777_000_000_000, 100, 101, 99, 100.5, 10]]
+
+    def fake_build_connector(cfg, **_kwargs):
+        assert cfg["venue"] == "gate"
+        return FakeGate()
+
+    monkeypatch.setattr("nerya.data.candles._fetch_public_rest_klines", fake_public_rest_klines)
+    monkeypatch.setattr("nerya.connectors.registry.build_connector", fake_build_connector)
+
+    rows = fetch_candles(
+        "GATE:BTCUSDT",
+        count=1,
+        interval="1h",
+        allow_mock=False,
+        config_like=cfg,
+    )
+
+    assert seen_public == ["GATE"]
+    assert seen_connector == ["GATE"]
+    assert rows[0]["close"] == 100.5
+    assert rows[0]["_envelope"]["venue"] == "gate"
+
+
+def test_native_market_data_returns_candles_and_features(tmp_path) -> None:
+    cfg = _config(tmp_path)
+
+    candles = _json_payload(
+        market_data_handler(
+            ToolCall(
+                name="market_data",
+                arguments={
+                    "action": "get_candles",
+                    "market": "mock:BTC/USDT",
+                    "interval": "1m",
+                    "count": 20,
+                },
+            ),
+            config_like=cfg,
+        )
+    )
+    features = _json_payload(
+        market_data_handler(
+            ToolCall(
+                name="market_data",
+                arguments={
+                    "action": "calculate_features",
+                    "market": "mock:BTC/USDT",
+                    "interval": "1m",
+                    "count": 40,
+                },
+            ),
+            config_like=cfg,
+        )
+    )
+
+    assert candles["count"] == 20
+    assert len(candles["candles"]) == 20
+    assert candles["coverage"]["bars"] == 20
+    assert "first_timestamp_iso" in candles["coverage"]
+    assert "last_timestamp_iso" in candles["coverage"]
+    assert features["count"] == 40
+    assert features["coverage"]["bars"] == 40
+    assert features["features"]["rsi_14"] is not None
+    assert features["features"]["macd"]["hist"] is not None
+
+
+def test_native_market_data_requires_explicit_market(tmp_path) -> None:
+    cfg = _config(tmp_path)
+
+    result = market_data_handler(
+        ToolCall(
+            name="market_data",
+            arguments={"action": "get_ticker"},
+        ),
+        config_like=cfg,
+    )
+
+    assert result.is_error
+    assert "market or symbol is required" in result.asdict()["content"][0]["text"]
+
+
+def test_native_market_data_lists_venue_symbols_in_one_call(tmp_path, monkeypatch) -> None:
+    cfg = _config(tmp_path)
+    monkeypatch.setattr(
+        "nerya.skills.builtin.markets.scripts.list_symbols.run",
+        lambda *, venue: {
+            "venue": venue,
+            "count": 2,
+            "symbols": [
+                {"symbol": "BTC/USDT", "base": "BTC", "quote": "USDT", "active": True, "type": "spot"},
+                {"symbol": "ETH/USDT", "base": "ETH", "quote": "USDT", "active": True, "type": "spot"},
+            ],
+            "error": None,
+        },
+    )
+    data = _json_payload(
+        market_data_handler(
+            ToolCall(name="market_data", arguments={"action": "list_symbols", "venue": "binance"}),
+            config_like=cfg,
+        )
+    )
+    assert data["venue"] == "binance"
+    assert data["count"] == 2
+    assert [row["base"] for row in data["symbols"]] == ["BTC", "ETH"]
+
+    shorthand = _json_payload(
+        market_data_handler(
+            ToolCall(name="market_data", arguments={"action": "list_symbols", "market": "BINANCE"}),
+            config_like=cfg,
+        )
+    )
+    assert shorthand["venue"] == "binance"
+
+    missing = market_data_handler(
+        ToolCall(name="market_data", arguments={"action": "list_symbols"}),
+        config_like=cfg,
+    )
+    assert missing.is_error
+    assert "venue is required" in missing.asdict()["content"][0]["text"]
+
+
+def test_native_market_data_passes_bounded_timeout_to_public_connector(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cfg = _config(tmp_path)
+    seen: dict[str, object] = {}
+
+    class FakeConnector:
+        venue = "YAHOO"
+        timeout = 99.0
+        timeout_ms = 99_000
+
+        def get_klines(self, market, *, interval="1d", limit=100):
+            seen["market"] = market
+            seen["interval"] = interval
+            seen["limit"] = limit
+            seen["timeout"] = self.timeout
+            seen["timeout_ms"] = self.timeout_ms
+            return [[1778247000000, 100.0, 101.0, 99.0, 100.5, 1234.0]]
+
+    def fake_build_connector(cfg_arg, **_kwargs):
+        seen["cfg_timeout_s"] = cfg_arg.get("timeout_s")
+        seen["cfg_timeout_ms"] = cfg_arg.get("timeout_ms")
+        return FakeConnector()
+
+    monkeypatch.setattr("nerya.tools.native.connectors.build_connector", fake_build_connector)
+
+    payload = _json_payload(
+        market_data_handler(
+            ToolCall(
+                name="market_data",
+                arguments={
+                    "action": "get_candles",
+                    "venue": "yahoo",
+                    "market": "DXY",
+                    "interval": "1d",
+                    "count": 1,
+                    "timeout_s": 1.5,
+                },
+            ),
+            config_like=cfg,
+        )
+    )
+
+    assert payload["count"] == 1
+    assert seen["cfg_timeout_s"] == 1.5
+    assert seen["cfg_timeout_ms"] == 1500
+    assert seen["timeout"] == 1.5
+    assert seen["timeout_ms"] == 1500
+    assert seen["market"] == "YAHOO:DXY"
+
+
+def test_market_data_sources_are_discovered_from_workspace_config(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    cfg.data.setdefault("workspace_preferences", {})["market_defaults"] = {
+        "venue": "okx",
+        "preferred_venues": ["okx", "bybit"],
+    }
+    yaml_io.dump(
+        cfg.paths.exchanges_file,
+        {"version": 1, "exchanges": {"kraken": {"venue": "kraken"}}},
+    )
+
+    sources = discover_market_data_sources(cfg)
+    venues = [row["canonical"] for row in sources]
+
+    assert venues[:2] == ["OKX", "BYBIT"]
+    assert "KRAKEN" in venues
+    assert "BINANCE" in venues
+
+
+def test_wallet_market_data_source_is_discovered_from_okx_binding(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    cfg.data["wallet"] = {
+        "providers": {
+            "okx_main": {
+                "provider": "okx_os",
+                "label": "OKX Web3",
+                "config": {},
+            }
+        }
+    }
+
+    sources = discover_market_data_sources(cfg)
+    venues = [row["canonical"] for row in sources]
+
+    assert "OKX_ONCHAIN" in venues
+
+
+def test_wallet_market_data_sources_are_discovered_for_all_supported_wallets(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    cfg.data["wallet"] = {
+        "providers": {
+            "okx_main": {"provider": "okx_os", "config": {}},
+            "bitget_main": {"provider": "bitget", "config": {}},
+            "binance_web3_main": {"provider": "binance_agentic", "config": {}},
+            "coinbase_main": {"provider": "coinbase", "config": {}},
+            "byreal_main": {"provider": "byreal", "config": {}},
+            "self_main": {"provider": "self_custody", "config": {}},
+        }
+    }
+
+    sources = discover_market_data_sources(cfg)
+    venues = {row["canonical"] for row in sources}
+
+    assert {
+        "OKX_ONCHAIN",
+        "BITGET_ONCHAIN",
+        "BINANCE_ALPHA",
+        "COINBASE_WALLET",
+        "BYREAL_ONCHAIN",
+    } <= venues
+    assert "SELF_CUSTODY_ONCHAIN" not in venues
+
+
+def test_wallet_provider_catalog_declares_verified_login_flows() -> None:
+    from nerya.wallet import list_providers
+
+    providers = {row["id"]: row for row in list_providers()}
+
+    okx_flows = {row["id"]: row for row in providers["okx_os"]["auth_flows"]}
+    assert okx_flows["okx_email_otp"]["kind"] == "email_otp"
+    assert all(row["kind"] != "advanced_api_key" for row in providers["okx_os"]["auth_flows"])
+    assert providers["okx_os"]["install_command"].startswith("github-release-bin:")
+    assert "onchainos wallet login <email>" in okx_flows["okx_email_otp"]["commands"]
+    assert "onchainos wallet verify <code>" in okx_flows["okx_email_otp"]["commands"]
+    okx_fields = {row["name"]: row for row in providers["okx_os"]["credential_fields"]}
+    assert okx_fields["account_id"]["required"] is False
+    assert "api_key" not in okx_fields
+    okx_advanced_fields = {
+        row["name"]: row for row in providers["okx_os"]["advanced_credential_fields"]
+    }
+    assert okx_advanced_fields["api_key"]["required"] is False
+
+    bitget_flows = {row["id"]: row for row in providers["bitget"]["auth_flows"]}
+    assert bitget_flows["bitget_wallet_skill"]["kind"] == "skill_builtin_token"
+    assert all(row["kind"] != "advanced_api_key" for row in providers["bitget"]["auth_flows"])
+    assert "https://github.com/bitget-wallet-ai-lab/bitget-wallet-skill" in providers["bitget"]["links"]["docs"]
+    bitget_default_fields = {row["name"] for row in providers["bitget"]["credential_fields"]}
+    assert "market_api_key" not in bitget_default_fields
+
+    binance_flows = {row["id"]: row for row in providers["binance_agentic"]["auth_flows"]}
+    assert binance_flows["binance_app_qr"]["kind"] == "app_qr"
+    assert providers["binance_agentic"]["install_command"].startswith("npm:@binance/agentic-wallet")
+    assert "baw auth signin --json" in binance_flows["binance_app_qr"]["commands"]
+    assert any("baw auth verify --qrCodeId" in cmd for cmd in binance_flows["binance_app_qr"]["commands"])
+
+    coinbase_flows = {row["id"]: row for row in providers["coinbase"]["auth_flows"]}
+    assert coinbase_flows["coinbase_email_otp"]["kind"] == "email_otp"
+    assert all(row["kind"] != "advanced_api_key" for row in providers["coinbase"]["auth_flows"])
+    assert providers["coinbase"]["install_command"].startswith("npm:awal#version=2.10.0")
+    assert "npx awal@2.10.0 auth login <email> --json" in coinbase_flows["coinbase_email_otp"]["commands"]
+    assert "npx awal@2.10.0 auth verify <otp> --json" in coinbase_flows["coinbase_email_otp"]["commands"]
+
+    byreal_flows = {row["id"]: row for row in providers["byreal"]["auth_flows"]}
+    assert byreal_flows["byreal_local_keypair"]["kind"] == "local_keypair"
+    assert providers["byreal"]["install_command"] == (
+        "npm:@byreal-io/byreal-cli#version=0.3.6&entry=dist/index.cjs"
+    )
+    assert "npm install -g @byreal-io/byreal-cli" in byreal_flows["byreal_local_keypair"]["commands"]
+    byreal_sources = {
+        row["canonical"] for row in providers["byreal"]["market_data_sources"]
+    }
+    assert "BYREAL_ONCHAIN" in byreal_sources
+
+
+def test_wallet_credential_schema_returns_auth_flows(tmp_path) -> None:
+    from nerya.api.routes_wallet import routes as wallet_routes
+
+    cfg = _config(tmp_path)
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/credential_schema")
+    ]
+    client = SimpleNamespace(config=cfg)
+
+    res = handler(client, {"provider": "okx_os"})
+
+    assert res["ok"] is True
+    assert res["auth_flows"][0]["id"] == "okx_email_otp"
+    assert "onchainos wallet login <email>" in res["auth_flows"][0]["commands"]
+    assert {row["name"] for row in res["credential_fields"]} == {
+        "account_id",
+        "api_project_id",
+    }
+    assert "api_key" in {row["name"] for row in res["advanced_credential_fields"]}
+
+
+def test_wallet_auth_start_installs_and_returns_binance_qr(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.api import routes_wallet
+    from nerya.api.routes_wallet import routes as wallet_routes
+    from nerya.install.dep_installer import InstallResult
+
+    cfg = _config(tmp_path)
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/auth/start")
+    ]
+    client = SimpleNamespace(config=cfg)
+
+    def fake_install(paths, command, *, config_data=None, approve=False):
+        assert command.startswith("npm:@binance/agentic-wallet")
+        assert approve is True
+        return InstallResult(
+            ok=True,
+            kind="npm",
+            target="@binance/agentic-wallet@1.0.9",
+            command="npm install",
+            duration_s=0.01,
+            install_path=str(tmp_path / "skills" / "_node" / "binance"),
+            extra={"entry": "dist/index.js"},
+        )
+
+    def fake_run_cli(client_arg, provider, args, *, timeout_s=180.0):
+        assert provider == "binance_agentic"
+        assert args == ["auth", "signin", "--json"]
+        return {
+            "ok": True,
+            "provider": provider,
+            "return_code": 0,
+            "json": {
+                "success": True,
+                "data": {
+                    "qrCodeId": "qr-123",
+                    "urlForWeb": "https://www.binance.com/web3/auth/qr-123",
+                    "pairingCode": "ABCD",
+                },
+            },
+        }
+
+    monkeypatch.setattr(routes_wallet, "run_install", fake_install)
+    monkeypatch.setattr(routes_wallet, "_run_wallet_cli", fake_run_cli)
+
+    res = handler(client, {"provider": "binance_agentic", "approve": True})
+
+    assert res["ok"] is True
+    assert res["next_action"] == "qr_approval"
+    assert res["auth"]["json"]["data"]["qrCodeId"] == "qr-123"
+    assert res["install"]["kind"] == "npm"
+
+
+def test_wallet_auth_start_binance_qr_creates_binding_for_market_data(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.api import routes_wallet
+    from nerya.api.routes_wallet import routes as wallet_routes
+
+    cfg = _config(tmp_path)
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/auth/start")
+    ]
+    client = SimpleNamespace(config=cfg)
+
+    def fake_run_cli(client_arg, provider, args, *, timeout_s=180.0):
+        assert provider == "binance_agentic"
+        return {
+            "ok": True,
+            "provider": provider,
+            "return_code": 0,
+            "json": {
+                "success": True,
+                "data": {
+                    "qrCodeId": "qr-123",
+                    "urlForWeb": "https://www.binance.com/web3/auth/qr-123",
+                },
+            },
+        }
+
+    monkeypatch.setattr(routes_wallet, "_run_wallet_cli", fake_run_cli)
+
+    res = handler(
+        client,
+        {
+            "provider": "binance_agentic",
+            "install": False,
+            "wallet_id": "binance_agentic_main",
+            "label": "Binance Agentic Wallet",
+            "create_binding": True,
+        },
+    )
+
+    assert res["ok"] is True
+    assert res["binding"]["ok"] is True
+    binding = cfg.data["wallet"]["providers"]["binance_agentic_main"]
+    assert binding["provider"] == "binance_agentic"
+
+
+def test_wallet_auth_start_byreal_requires_no_login_and_creates_binding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.api import routes_wallet
+    from nerya.api.routes_wallet import routes as wallet_routes
+
+    cfg = _config(tmp_path)
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/auth/start")
+    ]
+    client = SimpleNamespace(config=cfg)
+    pkg_root = tmp_path / "skills" / "_node" / "byreal-io__byreal-cli"
+    cli_path = pkg_root / "node_modules" / ".bin" / "byreal-cli"
+
+    def fake_install_for_auth(client_arg, provider, *, approve):
+        assert provider == "byreal"
+        assert approve is True
+        return {
+            "ok": True,
+            "kind": "npm",
+            "target": "@byreal-io/byreal-cli@0.3.6",
+            "command": "npm install @byreal-io/byreal-cli@0.3.6",
+            "duration_s": 0.01,
+            "install_path": str(pkg_root),
+            "extra": {
+                "entry": "dist/index.cjs",
+                "package": "@byreal-io/byreal-cli",
+                "version": "0.3.6",
+                "cli_path": str(cli_path),
+            },
+        }
+
+    monkeypatch.setattr(routes_wallet, "_install_for_auth", fake_install_for_auth)
+
+    res = handler(
+        client,
+        {
+            "provider": "byreal",
+            "approve": True,
+            "wallet_id": "byreal_main",
+            "label": "Byreal Solana",
+            "create_binding": True,
+        },
+    )
+
+    assert res["ok"] is True
+    assert res["next_action"] == "no_login_required"
+    assert res["required_inputs"] == []
+    binding = cfg.data["wallet"]["providers"]["byreal_main"]
+    assert binding["provider"] == "byreal"
+    assert binding["config"]["cli_path"] == str(cli_path)
+
+
+def test_wallet_auth_verify_uses_coinbase_awal_otp(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.api import routes_wallet
+    from nerya.api.routes_wallet import routes as wallet_routes
+
+    cfg = _config(tmp_path)
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/auth/verify")
+    ]
+    client = SimpleNamespace(config=cfg)
+
+    def fake_run_cli(client_arg, provider, args, *, timeout_s=300.0):
+        assert provider == "coinbase"
+        assert args == ["auth", "verify", "123456", "--json"]
+        return {"ok": True, "provider": provider, "return_code": 0, "json": {"success": True}}
+
+    monkeypatch.setattr(routes_wallet, "_run_wallet_cli", fake_run_cli)
+
+    res = handler(client, {"provider": "coinbase", "otp": "123456"})
+
+    assert res["ok"] is True
+    assert res["auth"]["json"]["success"] is True
+
+
+def test_wallet_auth_start_coinbase_returns_popup_when_window_runs(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.api import routes_wallet
+    from nerya.api.routes_wallet import routes as wallet_routes
+
+    cfg = _config(tmp_path)
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/auth/start")
+    ]
+    client = SimpleNamespace(config=cfg)
+
+    def fake_start_background(client_arg, provider, args, *, timeout_s=25.0):
+        assert provider == "coinbase"
+        assert args == ["auth", "login", "user@example.com", "--json"]
+        assert timeout_s == 25.0
+        return {
+            "ok": True,
+            "provider": provider,
+            "return_code": None,
+            "json": {
+                "loginMethod": "email_popup",
+                "walletWindow": {
+                    "running": True,
+                    "pid": 1234,
+                    "lock_file": "C:\\tmp\\payments-mcp-ui.lock",
+                },
+            },
+            "note": "coinbase_wallet_popup_started",
+        }
+
+    monkeypatch.setattr(routes_wallet, "_start_wallet_cli_background", fake_start_background)
+
+    res = handler(
+        client,
+        {
+            "provider": "coinbase",
+            "install": False,
+            "email": "user@example.com",
+        },
+    )
+
+    assert res["ok"] is True
+    assert res["next_action"] == "wallet_popup_login"
+    assert res["required_inputs"] == ["email_link"]
+    assert res["auth"]["json"]["loginMethod"] == "email_popup"
+    assert res["auth"]["json"]["walletWindow"]["running"] is True
+
+
+def test_wallet_auth_status_coinbase_uses_window_state_and_creates_binding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.api import routes_wallet
+    from nerya.api.routes_wallet import routes as wallet_routes
+
+    cfg = _config(tmp_path)
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/auth/status")
+    ]
+    client = SimpleNamespace(config=cfg)
+
+    monkeypatch.setattr(
+        routes_wallet,
+        "_coinbase_status_result",
+        lambda: {
+            "ok": True,
+            "provider": "coinbase",
+            "return_code": None,
+            "json": {
+                "walletWindow": {"running": True, "pid": 1234},
+                "agenticSessionPath": str(tmp_path / "Electron"),
+                "agenticSessionExists": True,
+                "loginMethod": "email_popup",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        routes_wallet,
+        "_coinbase_awal_session_path",
+        lambda: tmp_path / "Electron",
+    )
+
+    res = handler(
+        client,
+        {
+            "provider": "coinbase",
+            "wallet_id": "coinbase_main",
+            "label": "Coinbase Agentic Wallet",
+            "create_binding": True,
+        },
+    )
+
+    assert res["ok"] is True
+    assert res["binding"]["ok"] is True
+    binding = cfg.data["wallet"]["providers"]["coinbase_main"]
+    assert binding["provider"] == "coinbase"
+    assert binding["config"]["agentic_session_path"] == str(tmp_path / "Electron")
+
+
+def test_coinbase_awal_windows_patch_adds_proxy_shell_and_visible_popup(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.api import routes_wallet
+
+    cfg = _config(tmp_path)
+    root = cfg.paths.root / "skills" / "_node" / "awal" / "node_modules" / "awal"
+    manager = root / "dist" / "utils" / "serverManager.js"
+    manager.parent.mkdir(parents=True)
+    manager.write_text(
+        "const child = spawn(electronBin, [bundleElectron], {\n"
+        "        detached: true,\n"
+        "        stdio: 'ignore',\n"
+        "        env: {\n"
+        "            ...process.env,\n"
+        "        },\n"
+        "    });\n",
+        encoding="utf-8",
+    )
+    bundle = root / "server-bundle" / "bundle-electron.js"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_text("new sm({show:!1,width:500,height:600});", encoding="utf-8")
+    client = SimpleNamespace(config=cfg)
+
+    monkeypatch.setattr(routes_wallet.os, "name", "nt", raising=False)
+
+    routes_wallet._patch_coinbase_awal_windows(client)
+
+    patched = manager.read_text(encoding="utf-8")
+    assert "AWAL_ELECTRON_PROXY_SERVER" in patched
+    assert "const electronArgs = proxyServer" in patched
+    assert "shell: process.platform === 'win32'" in patched
+    assert "windowsHide: true" in patched
+    assert "proxy-bypass-list" not in patched
+    assert "new sm({show:!0,width:500" in bundle.read_text(encoding="utf-8")
+
+
+def test_wallet_auth_verify_creates_okx_account_and_binding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.api import routes_wallet
+    from nerya.api.routes_wallet import routes as wallet_routes
+
+    cfg = _config(tmp_path)
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/auth/verify")
+    ]
+    client = SimpleNamespace(config=cfg)
+    calls: list[list[str]] = []
+
+    def fake_run_cli(client_arg, provider, args, *, timeout_s=300.0):
+        assert provider == "okx_os"
+        calls.append(args)
+        if args == ["wallet", "verify", "123456"]:
+            return {"ok": True, "provider": provider, "return_code": 0, "json": {"ok": True, "data": {}}}
+        if args == ["wallet", "status"] and len(calls) == 2:
+            return {
+                "ok": True,
+                "provider": provider,
+                "return_code": 0,
+                "json": {"ok": True, "data": {"loggedIn": True, "accountCount": 0}},
+            }
+        if args == ["wallet", "add"]:
+            return {
+                "ok": True,
+                "provider": provider,
+                "return_code": 0,
+                "json": {"ok": True, "data": {"accountId": "okx-account-1", "accountName": "Wallet 1"}},
+            }
+        if args == ["wallet", "status"]:
+            return {
+                "ok": True,
+                "provider": provider,
+                "return_code": 0,
+                "json": {
+                    "ok": True,
+                    "data": {
+                        "loggedIn": True,
+                        "currentAccountId": "okx-account-1",
+                        "currentAccountName": "Wallet 1",
+                        "accountCount": 1,
+                    },
+                },
+            }
+        raise AssertionError(f"unexpected args: {args}")
+
+    monkeypatch.setattr(routes_wallet, "_run_wallet_cli", fake_run_cli)
+
+    res = handler(
+        client,
+        {
+            "provider": "okx_os",
+            "otp": "123456",
+            "wallet_id": "okx_os_main",
+            "label": "OKX Wallet",
+            "create_binding": True,
+        },
+    )
+
+    assert res["ok"] is True
+    assert res["account"]["created"] is True
+    assert res["binding"]["ok"] is True
+    binding = cfg.data["wallet"]["providers"]["okx_os_main"]
+    assert binding["provider"] == "okx_os"
+    assert binding["config"]["account_id"] == "okx-account-1"
+    assert calls == [
+        ["wallet", "verify", "123456"],
+        ["wallet", "status"],
+        ["wallet", "add"],
+        ["wallet", "status"],
+    ]
+
+
+def test_wallet_auth_start_no_login_provider_creates_binding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.api import routes_wallet
+    from nerya.api.routes_wallet import routes as wallet_routes
+
+    cfg = _config(tmp_path)
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/auth/start")
+    ]
+    client = SimpleNamespace(config=cfg)
+
+    def fake_install_for_auth(client_arg, provider, *, approve):
+        assert provider == "bitget"
+        assert approve is True
+        return {
+            "ok": True,
+            "kind": "git-repo",
+            "target": "https://github.com/bitget-wallet-ai-lab/bitget-wallet-skill",
+            "install_path": str(tmp_path / "skills" / "_node" / "bitget-wallet-skill"),
+            "extra": {"entry": "scripts/bitget-wallet-agent-api.py"},
+        }
+
+    monkeypatch.setattr(routes_wallet, "_install_for_auth", fake_install_for_auth)
+
+    res = handler(
+        client,
+        {
+            "provider": "bitget",
+            "approve": True,
+            "wallet_id": "bitget_main",
+            "label": "Bitget Wallet",
+            "create_binding": True,
+        },
+    )
+
+    assert res["ok"] is True
+    assert res["next_action"] == "no_login_required"
+    binding = cfg.data["wallet"]["providers"]["bitget_main"]
+    assert binding["provider"] == "bitget"
+    assert binding["config"]["skill_path"].endswith("bitget-wallet-skill")
+    assert binding["config"]["entry"] == "scripts/bitget-wallet-agent-api.py"
+
+
+def test_wallet_auth_start_does_not_overwrite_other_provider_binding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.api import routes_wallet
+    from nerya.api.routes_wallet import routes as wallet_routes
+
+    cfg = _config(tmp_path)
+    cfg.data["wallet"] = {
+        "providers": {
+            "okx_os_main": {
+                "provider": "okx_os",
+                "label": "OKX Wallet",
+                "config": {"account_id": "okx-account-1"},
+            }
+        }
+    }
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/auth/start")
+    ]
+    client = SimpleNamespace(config=cfg)
+
+    def fake_install_for_auth(client_arg, provider, *, approve):
+        return {
+            "ok": True,
+            "kind": "already-installed",
+            "target": "https://github.com/bitget-wallet-ai-lab/bitget-wallet-skill",
+            "install_path": str(tmp_path / "skills" / "_node" / "bitget-wallet-skill"),
+            "extra": {
+                "install_state": {
+                    "install_command": (
+                        "git-repo:https://github.com/bitget-wallet-ai-lab/bitget-wallet-skill"
+                        "#entry=scripts/bitget-wallet-agent-api.py"
+                    )
+                }
+            },
+        }
+
+    monkeypatch.setattr(routes_wallet, "_install_for_auth", fake_install_for_auth)
+
+    res = handler(
+        client,
+        {
+            "provider": "bitget",
+            "approve": True,
+            "wallet_id": "okx_os_main",
+            "label": "Stale OKX Label",
+            "create_binding": True,
+        },
+    )
+
+    assert res["ok"] is True
+    assert cfg.data["wallet"]["providers"]["okx_os_main"]["provider"] == "okx_os"
+    assert cfg.data["wallet"]["providers"]["bitget_main"]["provider"] == "bitget"
+    assert cfg.data["wallet"]["providers"]["bitget_main"]["label"].startswith("Bitget")
+
+
+def test_bitget_python_skill_readiness_and_klines(tmp_path, monkeypatch) -> None:
+    from nerya.wallet.providers.bitget import BitgetWalletSkill
+
+    skill_dir = tmp_path / "bitget-wallet-skill"
+    script = skill_dir / "scripts" / "bitget-wallet-agent-api.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("print('{}')\n", encoding="utf-8")
+    provider = BitgetWalletSkill(skill_path=str(skill_dir))
+
+    ready = provider.readiness()
+    assert ready.ready is True
+
+    def fake_run(self, args, *, timeout_s=30.0):
+        assert args[:5] == [
+            "kline",
+            "--chain",
+            "eth",
+            "--contract",
+            "0xtoken",
+        ]
+        return {
+            "status": 0,
+            "data": {
+                "list": [
+                    {
+                        "ts": 1778562000,
+                        "open": 1,
+                        "high": 2,
+                        "low": 0.5,
+                        "close": 1.5,
+                        "turnover": 12,
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(BitgetWalletSkill, "_run_python_skill", fake_run)
+    candles = provider.get_token_klines(
+        chain="eth", token="0xtoken", interval="1h", limit=1,
+    )
+
+    assert candles == [
+        {
+            # Kline timestamps are normalized to SECONDS across all wallet
+            # providers (okx/byreal/binance/bitget) — the old python-skill
+            # path emitted milliseconds.
+            "ts": 1778562000,
+            "open": 1.0,
+            "high": 2.0,
+            "low": 0.5,
+            "close": 1.5,
+            "volume": 12.0,
+        }
+    ]
+
+
+def test_wallet_readiness_report_uses_binding_over_placeholder_legacy_config(
+    tmp_path,
+) -> None:
+    from nerya.wallet.registry import readiness_report
+
+    skill_dir = tmp_path / "bitget-wallet-skill"
+    script = skill_dir / "scripts" / "bitget-wallet-agent-api.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("print('{}')\n", encoding="utf-8")
+    cfg = _config(tmp_path)
+    cfg.data["wallet"] = {
+        "bitget": {"skill_path": "", "entry": "dist/nerya.js"},
+        "providers": {
+            "bitget_main": {
+                "provider": "bitget",
+                "label": "Bitget Wallet",
+                "config": {
+                    "skill_path": str(skill_dir),
+                    "entry": "scripts/bitget-wallet-agent-api.py",
+                },
+            }
+        },
+    }
+
+    rows = readiness_report(cfg.data, workspace=tmp_path)
+    bitget = next(row for row in rows if row["id"] == "bitget")
+
+    assert bitget["configured_wallet_id"] == "bitget_main"
+    assert bitget["readiness"]["ready"] is True
+
+
+def test_binance_readiness_detects_installed_npm_package(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.wallet.providers._node_skill import NodeSkillRef
+    from nerya.wallet.registry import readiness_report
+
+    package_entry = (
+        tmp_path
+        / "skills"
+        / "_node"
+        / "binance__agentic-wallet"
+        / "node_modules"
+        / "@binance"
+        / "agentic-wallet"
+        / "dist"
+        / "index.js"
+    )
+    package_entry.parent.mkdir(parents=True)
+    package_entry.write_text("console.log('{}')\n", encoding="utf-8")
+    cfg = _config(tmp_path)
+    monkeypatch.setattr(NodeSkillRef, "node_available", lambda self: True)
+
+    rows = readiness_report(cfg.data, workspace=tmp_path)
+    binance = next(row for row in rows if row["id"] == "binance_agentic")
+
+    assert binance["readiness"]["ready"] is True
+
+
+def test_coinbase_readiness_prefers_agentic_wallet_binding_over_legacy_defaults(
+    tmp_path,
+) -> None:
+    from nerya.wallet.registry import readiness_report
+
+    cfg = _config(tmp_path)
+    cfg.data["wallet"] = {
+        "coinbase": {"network_id": "base-mainnet"},
+        "providers": {
+            "coinbase_main": {
+                "provider": "coinbase",
+                "label": "Coinbase Agentic Wallet",
+                "config": {"agentic_session_path": str(tmp_path / "Electron")},
+            }
+        },
+    }
+
+    rows = readiness_report(cfg.data, workspace=tmp_path)
+    coinbase = next(row for row in rows if row["id"] == "coinbase")
+
+    assert coinbase["configured_wallet_id"] == "coinbase_main"
+    # An agentic_session_path alone is not a runnable code path (no method
+    # implements it): readiness must NOT claim ready without a real SDK /
+    # node skill plus credentials — the old readiness overstated this case.
+    assert coinbase["readiness"]["ready"] is False
+    assert coinbase["readiness"]["missing"] != []
+
+
+def test_okx_wallet_market_data_routes_through_fetch_candles(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cfg = _config(tmp_path)
+    cfg.data["wallet"] = {
+        "providers": {
+            "okx_main": {
+                "provider": "okx_os",
+                "label": "OKX Web3",
+                "config": {
+                    "api_key": "key",
+                    "api_secret": "secret",
+                    "api_passphrase": "pass",
+                    "api_project_id": "project",
+                },
+            }
+        }
+    }
+
+    def fake_klines(self, *, chain, token, interval="1h", limit=100, **_kw):
+        assert chain == "ethereum"
+        assert token == "0xtoken"
+        assert interval == "1h"
+        assert limit == 2
+        assert self.api_key == "key"
+        return [
+            {"ts": 1, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0},
+            {"ts": 2, "open": 1.5, "high": 2.5, "low": 1.0, "close": 2.0, "volume": 11.0},
+        ]
+
+    monkeypatch.setattr(
+        "nerya.wallet.providers.okx_os.OkxOsWallet.get_token_klines",
+        fake_klines,
+    )
+
+    rows = fetch_candles(
+        "OKX_ONCHAIN:ethereum:0xtoken",
+        count=2,
+        interval="1h",
+        allow_mock=False,
+        config_like=cfg,
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["_envelope"]["source"] == "okx_os"
+    assert rows[0]["_envelope"]["venue"] == "okx_onchain"
+    assert rows[0]["_envelope"]["connector_id"] == "okx_main"
+
+
+def test_byreal_wallet_market_data_routes_through_byreal_cli(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cfg = _config(tmp_path)
+    cfg.data["wallet"] = {
+        "providers": {
+            "byreal_main": {
+                "provider": "byreal",
+                "label": "Byreal Solana",
+                "config": {},
+            }
+        }
+    }
+
+    pool_address = "So1anaPoo1Address11111111111111111111111111"
+
+    def fake_klines(self, *, chain, token, interval="1h", limit=100, **_kw):
+        assert chain == "solana"
+        assert token == pool_address
+        assert interval == "1h"
+        assert limit == 2
+        return [
+            {"ts": 1, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0},
+            {"ts": 2, "open": 1.5, "high": 2.5, "low": 1.0, "close": 2.0, "volume": 11.0},
+        ]
+
+    monkeypatch.setattr(
+        "nerya.wallet.providers.byreal.ByrealWallet.get_token_klines",
+        fake_klines,
+    )
+
+    rows = fetch_candles(
+        f"BYREAL_ONCHAIN:solana:{pool_address}",
+        count=2,
+        interval="1h",
+        allow_mock=False,
+        config_like=cfg,
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["_envelope"]["source"] == "byreal"
+    assert rows[0]["_envelope"]["venue"] == "byreal_onchain"
+    assert rows[0]["_envelope"]["connector_id"] == "byreal_main"
+
+
+def test_okx_wallet_market_data_can_use_onchainos_cli_without_api_keys(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.wallet.providers.okx_os import OkxOsWallet
+
+    wallet = OkxOsWallet(workspace=str(tmp_path), config={})
+    monkeypatch.setattr(wallet, "_onchainos_bin", lambda: "onchainos")
+
+    def fake_run(args, *, timeout_s=30.0):
+        assert args == [
+            "market",
+            "kline",
+            "--address",
+            "0xtoken",
+            "--chain",
+            "ethereum",
+            "--bar",
+            "1H",
+            "--limit",
+            "2",
+        ]
+        return [
+            {"ts": "2000", "o": "1", "h": "2", "l": "0.5", "c": "1.5", "vol": "10"},
+            {"ts": "3000", "o": "1.5", "h": "2.5", "l": "1", "c": "2", "vol": "11"},
+        ]
+
+    monkeypatch.setattr(wallet, "_run_onchainos", fake_run)
+
+    rows = wallet.get_token_klines(
+        chain="ethereum",
+        token="0xtoken",
+        interval="1h",
+        limit=2,
+    )
+
+    assert rows == [
+        {"ts": 2000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0},
+        {"ts": 3000, "open": 1.5, "high": 2.5, "low": 1.0, "close": 2.0, "volume": 11.0},
+    ]
+
+
+def test_bitget_wallet_market_data_routes_through_fetch_candles(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cfg = _config(tmp_path)
+    cfg.data["wallet"] = {
+        "providers": {
+            "bitget_main": {
+                "provider": "bitget",
+                "label": "Bitget Wallet",
+                "config": {
+                    "market_api_key": "key",
+                    "market_api_secret": "secret",
+                },
+            }
+        }
+    }
+
+    def fake_klines(self, *, chain, token, interval="1h", limit=100, **_kw):
+        assert chain == "base"
+        assert token == "0xtoken"
+        assert interval == "5m"
+        assert limit == 1
+        assert self.market_api_key == "key"
+        return [
+            {"ts": 2, "open": 2.0, "high": 3.0, "low": 1.0, "close": 2.5, "volume": 12.0},
+        ]
+
+    monkeypatch.setattr(
+        "nerya.wallet.providers.bitget.BitgetWalletSkill.get_token_klines",
+        fake_klines,
+        raising=False,
+    )
+
+    rows = fetch_candles(
+        "BITGET_ONCHAIN:base:0xtoken",
+        count=1,
+        interval="5m",
+        allow_mock=False,
+        config_like=cfg,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["_envelope"]["source"] == "bitget"
+    assert rows[0]["_envelope"]["venue"] == "bitget_onchain"
+    assert rows[0]["_envelope"]["connector_id"] == "bitget_main"
+
+
+def test_binance_alpha_wallet_market_data_routes_symbol_markets(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cfg = _config(tmp_path)
+    cfg.data["wallet"] = {
+        "providers": {
+            "binance_web3_main": {
+                "provider": "binance_agentic",
+                "label": "Binance Web3",
+                "config": {},
+            }
+        }
+    }
+
+    def fake_klines(self, *, market, interval="1h", limit=100, **_kw):
+        assert market == "ALPHA_175USDT"
+        assert interval == "15m"
+        assert limit == 1
+        return [
+            {"ts": 3, "open": 3.0, "high": 4.0, "low": 2.0, "close": 3.5, "volume": 13.0},
+        ]
+
+    monkeypatch.setattr(
+        "nerya.wallet.providers.binance_agentic.BinanceAgenticWallet.get_market_klines",
+        fake_klines,
+        raising=False,
+    )
+
+    rows = fetch_candles(
+        "BINANCE_ALPHA:ALPHA_175USDT",
+        count=1,
+        interval="15m",
+        allow_mock=False,
+        config_like=cfg,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["_envelope"]["source"] == "binance_agentic"
+    assert rows[0]["_envelope"]["venue"] == "binance_alpha"
+    assert rows[0]["_envelope"]["connector_id"] == "binance_web3_main"
+
+
+def test_coinbase_wallet_market_data_routes_product_markets(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cfg = _config(tmp_path)
+    cfg.data["wallet"] = {
+        "providers": {
+            "coinbase_main": {
+                "provider": "coinbase",
+                "label": "Coinbase CDP",
+                "config": {},
+            }
+        }
+    }
+
+    def fake_klines(self, *, market, interval="1h", limit=100, **_kw):
+        assert market == "BTC-USD"
+        assert interval == "1h"
+        assert limit == 1
+        return [
+            {"ts": 4, "open": 4.0, "high": 5.0, "low": 3.0, "close": 4.5, "volume": 14.0},
+        ]
+
+    monkeypatch.setattr(
+        "nerya.wallet.providers.coinbase.CoinbaseWallet.get_market_klines",
+        fake_klines,
+        raising=False,
+    )
+
+    rows = fetch_candles(
+        "COINBASE_WALLET:BTC-USD",
+        count=1,
+        interval="1h",
+        allow_mock=False,
+        config_like=cfg,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["_envelope"]["source"] == "coinbase"
+    assert rows[0]["_envelope"]["venue"] == "coinbase_wallet"
+    assert rows[0]["_envelope"]["connector_id"] == "coinbase_main"
+
+
+def test_wallet_configure_binding_vaultifies_plaintext(tmp_path) -> None:
+    from nerya.api.routes_wallet import routes as wallet_routes
+    from nerya.security.secrets import SecretVault
+
+    cfg = _config(tmp_path)
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/configure")
+    ]
+    client = SimpleNamespace(config=cfg)
+
+    res = handler(
+        client,
+        {
+            "provider": "okx_os",
+            "wallet_id": "okx_main",
+            "label": "OKX Web3",
+            "config": {
+                "api_key": "plain-key",
+                "api_secret": "plain-secret",
+                "api_passphrase": "plain-pass",
+                "api_project_id": "project-id",
+            },
+            "operator": "test",
+        },
+    )
+
+    assert res["ok"] is True
+    saved = yaml_io.load(cfg.paths.config)
+    binding = saved["wallet"]["providers"]["okx_main"]
+    assert binding["provider"] == "okx_os"
+    assert binding["config"]["api_key_ref"] == "vault://wallet_okx_main_api_key"
+    assert binding["config"]["api_project_id"] == "project-id"
+    assert "api_key" not in binding["config"]
+    vault = SecretVault.open(cfg.paths.vault_enc)
+    assert vault.resolve("wallet_okx_main_api_key", required_scope="wallet") == "plain-key"
+
+
+def test_wallet_swap_obeys_runtime_kill_switch(tmp_path, monkeypatch) -> None:
+    from nerya.api.routes_wallet import routes as wallet_routes
+    from nerya.wallet import swap_approval
+
+    cfg = _config(tmp_path)
+    cfg.data["runtime"]["live_trading_enabled"] = True
+    cfg.data["runtime"]["kill_switch"] = True
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/swap")
+    ]
+    client = SimpleNamespace(config=cfg)
+
+    def fail_build_provider(*_args, **_kwargs):  # noqa: ANN001
+        raise AssertionError("provider should not be built while kill switch is on")
+
+    monkeypatch.setattr(swap_approval, "build_provider", fail_build_provider)
+
+    res = handler(
+        client,
+        {
+            "provider": "byreal",
+            "chain": "solana",
+            "token_in": "SOL",
+            "token_out": "USDC",
+            "amount_in": 1,
+        },
+    )
+
+    assert res == {"ok": False, "error": "kill_switch_enabled"}
+
+
+def test_wallet_swap_journals_approval_request_and_one_shot_result(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.api import routes_approvals
+    from nerya.api.routes_wallet import routes as wallet_routes
+    from nerya.wallet import swap_approval
+    from nerya.wallet.protocol import WalletQuote, WalletSwapResult
+
+    cfg = _config(tmp_path)
+    cfg.data["runtime"]["live_trading_enabled"] = True
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/swap")
+    ]
+    client = SimpleNamespace(config=cfg)
+    swap_calls: list[dict] = []
+
+    class FakeProvider:
+        def quote(self, **kwargs):  # noqa: ANN001
+            return WalletQuote(
+                provider="byreal",
+                chain=kwargs["chain"],
+                token_in=kwargs["token_in"],
+                token_out=kwargs["token_out"],
+                amount_in=kwargs["amount_in"],
+                expected_out=100,
+                min_out=99,
+                slippage_bps=kwargs["slippage_bps"],
+            )
+
+        def swap(self, **kwargs):  # noqa: ANN001
+            swap_calls.append(dict(kwargs))
+            assert kwargs["live"] is True
+            assert kwargs["min_out"] == 99
+            return WalletSwapResult(
+                provider="byreal",
+                chain=kwargs["chain"],
+                ok=True,
+                tx_hash="tx-123",
+                amount_in=kwargs["amount_in"],
+                amount_out=99,
+                extra={'confirmed':True,'amount_out_source':'transaction_meta'},
+            )
+
+    provider = FakeProvider()
+    monkeypatch.setattr(
+        swap_approval,
+        "build_provider",
+        lambda *_args, **_kwargs: provider,
+    )
+
+    res = handler(
+        client,
+        {
+            "provider": "byreal",
+            "chain": "solana",
+            "token_in": "SOL",
+            "token_out": "USDC",
+            "amount_in": 1,
+            "slippage_bps": 25,
+        },
+    )
+
+    assert res["ok"] is True
+    assert res["status"] == "pending_approval"
+    assert swap_calls == []
+
+    approved = routes_approvals._callback(
+        client,
+        {
+            "callback_data": f"approve:{res['approval_id']}",
+            "_auth_actor_id": "operator",
+            "_auth_scopes": ["approve:trade"],
+        },
+    )
+    assert approved["ok"] is True
+    assert approved["state"] == "approved"
+    assert approved["approval_kind"] == "wallet_swap"
+    assert approved["resume"]["ok"] is True
+    assert len(swap_calls) == 1
+
+    rows = jsonl.read_all(cfg.paths.journal("wallet"))
+    assert [row["kind"] for row in rows[-4:]] == [
+        "wallet.swap.approval_requested",
+        "wallet.swap.requested",
+        "wallet.swap.result",
+        "wallet.swap.approval_resumed",
+    ]
+    assert rows[-2]["tx_hash"] == "tx-123"
+    assert "private" not in str(rows).lower()
+
+
+def test_subagent_market_data_uses_the_native_executor(tmp_path) -> None:
+    from test_subagent_native_runtime import Gateway, call, final, runtime, spec, run, descriptor
+    cfg = _config(tmp_path)
+    gateway = Gateway(call("market_data", action="calculate_features", market="mock:BTC/USDT", interval="1m", count=40), final())
+    rt = runtime(tmp_path, gateway, [descriptor("market_data", handler=lambda c: market_data_handler(c, config_like=cfg))])
+    result = run(rt, spec(tmp_path))
+    data = result["metrics"]["skill_calls"][0]["result"]["data"]
+    assert data["count"] == 40
+    assert data["features"]["rsi_14"] is not None
+    assert len(gateway.calls) == 2
+
+
+def test_strategy_context_legacy_portfolio_pnl_and_dict_return_compat(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    ledger = open_ledger(cfg.paths, "paper_main", 10_000)
+    ledger.apply_fill(
+        market="binance:BTCUSDT",
+        side="buy",
+        price=50_000,
+        size=0.1,
+        fee_usd=0,
+    )
+
+    portfolio = StrategyPortfolio(paths=cfg.paths)
+    positions = portfolio.positions("BTC/USDT")
+    assert portfolio.equity_usd == pytest.approx(10_000)
+    assert len(positions) == 1
+    assert positions[0].quantity == pytest.approx(0.1)
+    assert positions[0].market_value_usd == pytest.approx(5_000)
+    assert StrategyPnL(paths=cfg.paths, strategy_id="dict_return").summary()["drawdown_pct"] == 0
+
+    root = cfg.paths.strategy("dict_return")
+    root.mkdir(parents=True, exist_ok=True)
+    yaml_io.dump(
+        root / "strategy.yml",
+        {
+            "version": 1,
+            "strategy_id": "dict_return",
+            "title": "Dict Return Compatibility",
+            "mode": "paper",
+            "entrypoint": "main.py:run",
+            "markets": ["BINANCE:BTCUSDT"],
+            "accounts": ["paper_main"],
+            "schedule": {"type": "interval", "every_seconds": 60},
+            "policy": {
+                "max_single_order_usd": 100,
+                "max_daily_notional_usd": 500,
+            "max_open_positions": 1,
+            "min_confidence": 0,
+            "max_run_seconds": 30,
+            },
+        },
+    )
+    (root / "main.py").write_text(
+        "\n".join(
+            [
+                "def run(ctx):",
+                "    assert ctx.portfolio.equity_usd > 0",
+                "    assert ctx.pnl.summary()['drawdown_pct'] >= 0",
+                "    ctx.log.info('compat path')",
+                "    assert ctx.market_data is ctx.market",
+                "    assert ctx.now().tzinfo is not None",
+                "    return {'decision': 'HOLD', 'reason': 'legacy dict hold', 'market': ctx.config.markets[0]}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    record = StrategyRunner(config=cfg).run_tick("dict_return", mode_override="paper")
+    assert record.status == "hold"
+    assert record.reason == "legacy dict hold"
+    result = record.outputs["result"]
+    assert result["metadata"]["decision"] == "HOLD"
+    assert result["metadata"]["return_summary"]["market"] == "BINANCE:BTCUSDT"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not REAL_MARKET_TESTS,
+    reason="set NERYA_REAL_MARKET_TESTS=1 to hit real public market-data APIs",
+)
+def test_real_public_market_data_loads_for_native_and_strategy_paths(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    cfg.data.setdefault("workspace_preferences", {})["market_defaults"] = {
+        "venue": "binance",
+        "preferred_venues": ["binance", "okx", "bybit"],
+    }
+    market_id, rows = _first_live_candles(cfg, count=40)
+    assert len(rows) == 40
+    env = rows[0]["_envelope"]
+    assert env["mode"] == "live"
+    assert env["source"] != "mock"
+    assert env["fallback_used"] is False
+
+    perp_rows = fetch_candles(
+        "binance_perpetual:ETHUSDT",
+        count=20,
+        interval="1m",
+        allow_mock=False,
+        config_like=cfg,
+    )
+    assert len(perp_rows) == 20
+    perp_env = perp_rows[0]["_envelope"]
+    assert perp_env["mode"] == "live"
+    assert perp_env["source"] != "mock"
+
+    dynamic_rows = fetch_candles(
+        "BTCUSDT",
+        count=20,
+        interval="1m",
+        allow_mock=False,
+        config_like=cfg,
+    )
+    assert len(dynamic_rows) == 20
+    dynamic_env = dynamic_rows[0]["_envelope"]
+    assert dynamic_env["mode"] == "live"
+    assert dynamic_env["source"] != "mock"
+
+    ticker = fetch_public_ticker("binance:BTCUSDT", allow_mock=False, config_like=cfg)
+    assert ticker["price"] > 0
+    assert ticker["age_s"] == 0
+    assert ticker["_envelope"]["mode"] == "live"
+    assert ticker["_envelope"]["source"] != "mock"
+
+    native = _json_payload(
+        market_data_handler(
+            ToolCall(
+                name="market_data",
+                arguments={
+                    "action": "calculate_features",
+                    "market": market_id,
+                    "interval": "1m",
+                    "count": 40,
+                },
+            ),
+            config_like=cfg,
+        )
+    )
+    assert native["count"] == 40
+    assert native["_envelope"]["mode"] == "live"
+    assert native["_envelope"]["source"] != "mock"
+    assert native["features"]["rsi_14"] is not None
+    assert native["features"]["macd"]["hist"] is not None
+
+    market = StrategyMarket(
+        paths=cfg.paths,
+        accounts=("paper_main",),
+        _registry_factory=lambda: __import__(
+            "nerya.connectors.registry",
+            fromlist=["ConnectorRegistry"],
+        ).ConnectorRegistry(cfg.paths.root),
+    )
+    strategy_features = market.features(
+        market_id,
+        timeframe="1m",
+        lookback=40,
+    )
+    assert strategy_features["rows"] == 40
+    assert strategy_features["first"]["_envelope"]["mode"] == "live"
+    assert strategy_features["first"]["_envelope"]["source"] != "mock"
+    assert strategy_features["rsi_14"] is not None

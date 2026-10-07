@@ -1,0 +1,823 @@
+"""Local stdlib HTTP server for Nerya.
+
+This is intentionally small: it's a convenience surface for the dashboard
+and CI. Production deployments should front it with a real framework.
+"""
+
+from __future__ import annotations
+
+import gc
+import hmac
+import json
+import logging
+import math
+import os
+import threading
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Callable
+
+from ..core.config import Config
+from ..core.errors import LLMError
+from ..llm.retry import parse_retry_after
+from ..sdk import InternalClient
+from ..skills.kernel import SkillKernel
+from . import auth as auth_mod
+from . import routes_agent, routes_approvals, routes_auth, routes_capability, routes_dev, routes_discovery, routes_evolution
+from . import routes_exchanges, routes_health, routes_llm, routes_market
+from . import routes_browsers, routes_data_sources, routes_memory, routes_messages, routes_network, routes_oauth, routes_portfolio, routes_provider_auth, routes_scripts, routes_search, routes_security
+from . import routes_skills, routes_strategies_runtime, routes_strategy
+from . import routes_strategy_history, routes_trading
+from . import routes_teams
+from . import routes_triggers, routes_wallet, routes_workspace
+from . import routes_workspace_ui
+from . import routes_gateway
+from . import routes_operator, routes_inbox, routes_agent_tasks, routes_accounts
+from . import routes_account_intake
+from . import routes_control_plane
+from . import routes_charts
+# Runtime capability catalog, data-source sync, trading evidence vault,
+# and E2E verification artifacts.
+from . import routes_capabilities
+from . import routes_data_source_sync
+from . import routes_evidence
+from . import routes_e2e_artifacts
+# Runtime feature flags.
+from . import routes_runtime_flags
+# Durable raw tool-result store.
+from . import routes_tool_raw
+
+
+Route = tuple[str, str, Callable[[InternalClient, dict[str, Any]], Any]]
+
+_ROUTES: list[Route] = []
+_CRON_THREADS: dict[str, threading.Thread] = {}
+_ACCOUNT_REFRESH_THREADS: dict[str, threading.Thread] = {}
+_LIVE_ORDER_POLL_THREADS: dict[str, threading.Thread] = {}
+_GC_REAPER_THREADS: dict[str, threading.Thread] = {}
+_SHARED_SKILLS: dict[str, SkillKernel] = {}
+_SHARED_SKILLS_LOCK = threading.RLock()
+_THREAD_CLIENTS = threading.local()
+log = logging.getLogger(__name__)
+
+
+def _rate_limit_response(exc: BaseException) -> dict[str, Any] | None:
+    """Expected provider throttling is not a runtime failure or a stack trace."""
+    if not isinstance(exc, LLMError) or getattr(exc, "status_code", None) != 429:
+        return None
+    quota = bool(getattr(exc, "quota_exhausted", False))
+    return {
+        "error": "quota_exhausted" if quota else "rate_limited",
+        "status_code": 429,
+        "message": "Provider quota exhausted." if quota else "Provider rate limit reached.",
+        "provider": getattr(exc, "provider", ""),
+        "request_id": getattr(exc, "request_id", ""),
+        "retryable": bool(getattr(exc, "retryable", not quota)),
+        "retry_after_s": parse_retry_after(getattr(exc, "response_headers", None)),
+        "retry_exhausted": getattr(exc, "retry_exhausted", None),
+    }
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+_TRUSTED_AUTH_PAYLOAD_PATHS = frozenset({
+    "/browsers/agent",
+    "/agent/run_turn",
+    "/agent/run_turn_internal",
+    "/agent/commands",
+    "/agent/commands/control",
+    "/agent/interactions/respond",
+    "/approvals/callback",
+    "/strategy/close_positions",
+    "/trading/cancel",
+    "/orders/cancel",
+    "/executors/cancel",
+    "/trading/submit",
+    "/wallet/swap",
+    "/inbox/resolve",
+    '/strategies/runtime/run_tick',
+})
+_DASHBOARD_INTERNAL_HEADER = "x-nerya-dashboard-internal"
+
+
+def _memory_request_client(config: Config, auth: auth_mod.AuthResult, path: str) -> InternalClient:
+    """Memory routes use a request-local authenticated identity, never body ids."""
+    client = _client_for_current_thread(config)
+    if path.startswith(("/agent/runs", "/agent/tasks", "/financial/", "/triggers/",'/inbox/','/approvals/','/wallet/','/strategies/runtime/')):
+        from copy import copy
+        client = copy(client)
+        client.auth_actor_id = auth.actor
+        client.auth_scopes = auth.scopes
+    if path.startswith("/memory/"):
+        from copy import copy
+        client = copy(client)
+        from ..memory.scope import memory_actor
+        client.actor_id = memory_actor(auth.actor)
+    return client
+
+
+def _stamp_trusted_auth(payload: dict[str, Any], auth: auth_mod.AuthResult) -> dict[str, Any]:
+    """Attach dispatcher-verified identity to sensitive route payloads."""
+
+    stamped = dict(payload or {})
+    stamped["_auth_actor_id"] = str(auth.actor or "").strip()
+    stamped["_auth_scope"] = str(auth.scope or "").strip()
+    stamped["_auth_scopes"] = sorted(str(scope) for scope in (auth.scopes or ()))
+    return stamped
+
+
+class StreamingResponse:
+    """Marker that lets a route handler stream chunks instead of returning JSON.
+
+    The dispatcher (:meth:`do_GET`/:meth:`do_POST`) detects this object,
+    writes the headers, and then iterates ``generator``, flushing each
+    chunk to the client. Used for Server-Sent Events (``/gateway/events/stream``)
+    so the dashboard can subscribe via ``EventSource`` and receive every
+    inbound/outbound/phase tick the moment it lands in the gateway ring
+    buffer — no polling.
+
+    The generator should yield either ``bytes`` or ``str``. Empty values
+    are skipped. The dispatcher catches connection errors and silently
+    aborts so a disconnected client does not log noise.
+    """
+
+    def __init__(
+        self,
+        *,
+        generator,
+        content_type: str = "text/event-stream",
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.generator = generator
+        self.content_type = content_type
+        self.extra_headers = dict(headers or {})
+
+    def run(self, handler: BaseHTTPRequestHandler) -> None:
+        try:
+            handler.send_response(200)
+            handler.send_header("Content-Type", self.content_type)
+            handler.send_header("Cache-Control", "no-cache, no-transform")
+            handler.send_header("Connection", "keep-alive")
+            # Disable nginx/Vercel proxy buffering for true streaming.
+            handler.send_header("X-Accel-Buffering", "no")
+            for key, value in self.extra_headers.items():
+                handler.send_header(key, value)
+            for key, value in _cors_headers(handler):
+                handler.send_header(key, value)
+            handler.end_headers()
+            try:
+                handler.wfile.flush()
+            except Exception:  # pragma: no cover - best-effort
+                pass
+            for chunk in self.generator:
+                if chunk is None or chunk == "":
+                    continue
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8")
+                handler.wfile.write(chunk)
+                try:
+                    handler.wfile.flush()
+                except Exception:  # pragma: no cover - best-effort
+                    pass
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            # Client closed the EventSource — that's the normal exit path.
+            return
+        except Exception:  # pragma: no cover - background guard
+            log.exception("streaming response generator failed")
+            return
+
+
+def _cors_allow_origin(origin: str) -> str | None:
+    """Return the Origin to echo, or None when it must not be echoed.
+
+    The dashboard talks to this API same-origin through its own /api/proxy,
+    so CORS only ever needs to serve local dev tools on loopback. In local
+    auth mode a loopback-origin browser request is auto-authenticated, so
+    echoing ``*`` (or an arbitrary origin) would let any webpage the
+    operator visits read wallet/portfolio data cross-origin.
+    """
+    raw = (origin or "").strip()
+    if not raw:
+        return None
+    try:
+        hostname = (urllib.parse.urlsplit(raw).hostname or "").strip().lower()
+    except ValueError:
+        return None
+    if hostname in {"127.0.0.1", "::1", "localhost"} or hostname.startswith("127."):
+        return raw
+    return None
+
+
+def _cors_headers(handler: BaseHTTPRequestHandler) -> list[tuple[str, str]]:
+    origin = _cors_allow_origin(handler.headers.get("Origin") or "")
+    headers = [("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+               ("Access-Control-Allow-Headers",
+                "Content-Type, Authorization, X-Nerya-Token")]
+    if origin:
+        headers.append(("Access-Control-Allow-Origin", origin))
+        headers.append(("Vary", "Origin"))
+    return headers
+
+
+class BinaryResponse:
+    """Finite byte response for raw workspace artifacts.
+
+    Unlike :class:`StreamingResponse`, this sends a content length and does
+    not force event-stream headers, so the dashboard can embed images, PDFs,
+    and other local file previews through the normal proxy.
+    """
+
+    def __init__(
+        self,
+        *,
+        body: bytes,
+        content_type: str = "application/octet-stream",
+        status: int = 200,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.body = body
+        self.content_type = content_type
+        self.status = status
+        self.extra_headers = dict(headers or {})
+
+    def run(self, handler: BaseHTTPRequestHandler) -> None:
+        handler.send_response(self.status)
+        handler.send_header("Content-Type", self.content_type)
+        handler.send_header("Content-Length", str(len(self.body)))
+        handler.send_header("Cache-Control", "no-store")
+        for key, value in self.extra_headers.items():
+            handler.send_header(key, value)
+        for key, value in _cors_headers(handler):
+            handler.send_header(key, value)
+        handler.end_headers()
+        handler.wfile.write(self.body)
+
+
+def _register(method: str, path: str, handler):
+    _ROUTES.append((method.upper(), path, handler))
+
+
+def _collect_routes(extra_modules: tuple = ()) -> None:
+    """Merge every route module into ``_ROUTES`` exactly once.
+
+    The explicit tuple below is the *order anchor* — it keeps route
+    registration deterministic and reviewable. Any ``routes_*`` module
+    present in the package but missing from the tuple is picked up by
+    :func:`_discover_route_modules` (pkgutil scan) and appended in
+    alphabetical order, so adding a route module no longer requires
+    editing two places (imports + tuple) in this file. Test seams may
+    inject synthetic modules via ``extra_modules``.
+    """
+    if _ROUTES:
+        return
+    base_modules = (routes_health, routes_auth, routes_workspace, routes_workspace_ui, routes_agent,
+                routes_skills, routes_triggers, routes_trading,
+                routes_llm, routes_memory, routes_strategy_history, routes_scripts,
+                routes_search, routes_browsers, routes_data_sources,
+                routes_messages, routes_evolution, routes_security, routes_network,
+                routes_market, routes_portfolio, routes_wallet,
+                routes_exchanges, routes_discovery, routes_dev,
+                routes_capability, routes_approvals,
+                routes_provider_auth, routes_oauth, routes_gateway, routes_teams,
+                routes_strategies_runtime, routes_strategy,
+                routes_operator, routes_inbox, routes_agent_tasks,
+                routes_control_plane, routes_accounts,
+                routes_account_intake, routes_charts,
+                            # Runtime capability and evidence surfaces
+                            routes_capabilities, routes_data_source_sync,
+                            routes_evidence, routes_e2e_artifacts,
+                            # Runtime feature flags
+                            routes_runtime_flags,
+                            # Raw tool-result store
+                            routes_tool_raw)
+    modules = base_modules + _discover_route_modules(base_modules) + tuple(extra_modules)
+    for mod in modules:
+        for method, path, handler in mod.routes():
+            _register(method, path, handler)
+
+
+def _discover_route_modules(known: tuple) -> tuple:
+    """Import every ``nerya.api.routes_*`` module missing from ``known``.
+
+    Failure to import a discovered module is logged and skipped — a
+    broken optional surface must not prevent the API from booting.
+    """
+
+    import importlib
+    import pkgutil
+    from pathlib import Path
+
+    known_names = {getattr(m, "__name__", "") for m in known}
+    package_dir = Path(__file__).resolve().parent
+    discovered: list = []
+    for _, mod_name, _ in pkgutil.iter_modules([str(package_dir)]):
+        if not mod_name.startswith("routes_"):
+            continue
+        full = f"{__package__}.{mod_name}"
+        if full in known_names:
+            continue
+        try:
+            discovered.append(importlib.import_module(full))
+        except Exception:
+            log.warning("route module %s failed to import", full,
+                        exc_info=True)
+    # Alphabetical for deterministic ordering of the tail.
+    discovered.sort(key=lambda m: m.__name__)
+    return tuple(discovered)
+
+
+def _path_params(pattern: str, path: str) -> dict[str, str] | None:
+    from urllib.parse import unquote
+
+    if pattern == path:
+        return {}
+    pattern_parts = [part for part in pattern.strip("/").split("/") if part]
+    path_parts = [part for part in path.strip("/").split("/") if part]
+    params: dict[str, str] = {}
+    i = 0
+    j = 0
+    while i < len(pattern_parts):
+        expected = pattern_parts[i]
+        variadic = (
+            expected.startswith("{")
+            and expected.endswith("...}")
+            and len(expected) > 5
+        )
+        if variadic:
+            name = expected[1:-4]
+            params[name] = unquote("/".join(path_parts[j:]))
+            return params
+        if j >= len(path_parts):
+            return None
+        actual = path_parts[j]
+        if expected.startswith("{") and expected.endswith("}") and len(expected) > 2:
+            params[expected[1:-1]] = unquote(actual)
+        elif expected != actual:
+            return None
+        i += 1
+        j += 1
+    if j != len(path_parts):
+        return None
+    return params
+
+
+def _match(method: str, path: str):
+    for m, p, h in _ROUTES:
+        if m != method:
+            continue
+        params = _path_params(p, path)
+        if params is not None:
+            return h, params
+    return None, {}
+
+
+def _status_body_from_result(result: Any) -> tuple[int, dict[str, Any]]:
+    status = 200
+    body = result if result is not None else {}
+    if isinstance(body, dict) and isinstance(body.get("_status"), int):
+        status = int(body["_status"])
+        body = {k: v for k, v in body.items() if k != "_status"}
+    return status, body
+
+
+def _start_cron_scheduler(client: InternalClient) -> None:
+    if os.environ.get("NERYA_DISABLE_CRON", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    key = str(client.config.paths.root.resolve())
+    thread = _CRON_THREADS.get(key)
+    if thread is not None and thread.is_alive():
+        return
+
+    from ..triggers.cron import CronScheduler
+
+    scheduler = CronScheduler(client.config, client.triggers_runtime)
+    thread = threading.Thread(
+        target=scheduler.run_forever,
+        kwargs={"poll_s": 1.0},
+        name=f"nerya-cron-{client.config.paths.root.name}",
+        daemon=True,
+    )
+    thread.start()
+    _CRON_THREADS[key] = thread
+
+
+def _start_account_refresh_loop(client: InternalClient) -> None:
+    if os.environ.get("NERYA_DISABLE_ACCOUNT_REFRESH", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    key = str(client.config.paths.root.resolve())
+    thread = _ACCOUNT_REFRESH_THREADS.get(key)
+    if thread is not None and thread.is_alive():
+        return
+
+    def _run() -> None:
+        from ..trading.account_refresh import (
+            live_refresh_interval_seconds,
+            refresh_account_marks,
+        )
+
+        # The fast loop tick is governed by the live cadence (default
+        # 60s). ``refresh_account_marks(only_due=True)`` skips paper
+        # accounts whose snapshots are still inside their longer
+        # window, so we don't pay the projection cost on every tick.
+        while True:
+            tick = live_refresh_interval_seconds(client.config)
+            try:
+                refresh_account_marks(
+                    client.config,
+                    run_executors=False,
+                    only_due=True,
+                )
+            except Exception:  # pragma: no cover - background loop guard
+                log.exception("account refresh loop failed")
+            time.sleep(max(5.0, tick))
+
+    thread = threading.Thread(
+        target=_run,
+        name=f"nerya-account-refresh-{client.config.paths.root.name}",
+        daemon=True,
+    )
+    thread.start()
+    _ACCOUNT_REFRESH_THREADS[key] = thread
+
+
+def _start_live_order_poller(client: InternalClient) -> None:
+    """Background loop that polls non-terminal live orders.
+
+    Drives the same ``OrderTracker.active_orders`` slice the executor
+    pipeline updates, calls ``connector.get_order`` for each, applies
+    any new fills to the :class:`PositionBook`, and promotes the
+    tracker through terminal states. The loop is restart-safe: when
+    the process boots, ``active_orders`` is the union of orders that
+    were submitted by any prior process and never terminated, so the
+    poller naturally picks them up.
+
+    The cadence is governed by ``trading.live_order_poll_interval_s``
+    (default 5s) — short enough to feel real-time on the dashboard but
+    long enough to leave plenty of headroom under venue rate limits.
+    Each cycle also advances order and protection executors, independently
+    of the slower account NAV refresh.
+    """
+
+    if os.environ.get("NERYA_DISABLE_ORDER_POLLER", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    key = str(client.config.paths.root.resolve())
+    thread = _LIVE_ORDER_POLL_THREADS.get(key)
+    if thread is not None and thread.is_alive():
+        return
+
+    def _run() -> None:
+        from ..trading.order_polling import poll_active_live_orders
+
+        while True:
+            tick = float(
+                client.config.get("trading.live_order_poll_interval_s", 5.0)
+            )
+            try:
+                poll_active_live_orders(client.config)
+            except Exception:  # pragma: no cover - background loop guard
+                log.exception("live order poller failed")
+            try:
+                from contextlib import closing
+                from ..trading.executors import ExecutorOrchestrator
+                from ..trading.guard import active as guard_active
+                if not guard_active(client.config):
+                    with closing(ExecutorOrchestrator(client.config)) as orchestrator:
+                        orchestrator.run_once()
+            except Exception:
+                log.exception("trading executor tick failed")
+            try:
+                from ..wallet.swap_approval import reconcile_pending
+                reconcile_pending(client.config)
+            except Exception:
+                log.exception("wallet transaction reconciliation failed")
+            time.sleep(max(1.0, tick))
+
+    thread = threading.Thread(
+        target=_run,
+        name=f"nerya-live-order-poller-{client.config.paths.root.name}",
+        daemon=True,
+    )
+    thread.start()
+    _LIVE_ORDER_POLL_THREADS[key] = thread
+
+
+def _start_idle_gc_reaper(client: InternalClient) -> None:
+    """Periodically run a cyclic GC pass so idle SQLite connections close.
+
+    ``sqlite3.Connection`` participates in internal reference cycles (its
+    statement cache), so a handle that isn't explicitly ``.close()``d is
+    reclaimed only by CPython's *cyclic* collector, never by plain
+    refcounting. ``ThreadingHTTPServer`` spawns a thread per request and
+    each caches a thread-local ``InternalClient`` with lazy DB handles
+    (TriggerRouter, etc.), so dashboard polling steadily accumulates open
+    ``nerya.db`` fds while the box is otherwise idle. Under load the
+    collector fires on its own and the fds drop, but an idle server can
+    drift toward its fd ceiling. A low-frequency explicit ``gc.collect()``
+    bounds that drift uniformly across every store without threading
+    ``.close()`` through dozens of read handlers.
+    """
+
+    if os.environ.get("NERYA_DISABLE_GC_REAPER", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    key = str(client.config.paths.root.resolve())
+    thread = _GC_REAPER_THREADS.get(key)
+    if thread is not None and thread.is_alive():
+        return
+
+    def _run() -> None:
+        while True:
+            tick = float(client.config.get("runtime.gc_reaper_interval_s", 45.0))
+            time.sleep(max(10.0, tick))
+            try:
+                gc.collect()
+            except Exception:  # pragma: no cover - background loop guard
+                log.exception("idle gc reaper failed")
+
+    thread = threading.Thread(
+        target=_run,
+        name=f"nerya-gc-reaper-{client.config.paths.root.name}",
+        daemon=True,
+    )
+    thread.start()
+    _GC_REAPER_THREADS[key] = thread
+
+
+def _client_for_current_thread(config: Config) -> InternalClient:
+    """Return a client whose lazy DB handles belong to this request thread."""
+    key = str(config.paths.root.resolve())
+    cache = getattr(_THREAD_CLIENTS, "clients", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        _THREAD_CLIENTS.clients = cache
+    client = cache.get(key)
+    if client is None:
+        client = InternalClient.from_config(
+            config,
+            skills=_shared_skills_for_config(config),
+        )
+        cache[key] = client
+    return client
+
+
+def _shared_skills_for_config(config: Config) -> SkillKernel:
+    """Reuse the expensive skill registry across short-lived request threads.
+
+    ``ThreadingHTTPServer`` creates fresh request threads under browser
+    fan-out. Keeping the whole InternalClient thread-local protects lazy
+    SQLite handles in TriggerRouter, but booting SkillKernel on every thread
+    made dashboard page loads pay the builtin/workspace skill scan many times.
+    """
+
+    key = str(config.paths.root.resolve())
+    with _SHARED_SKILLS_LOCK:
+        skills = _SHARED_SKILLS.get(key)
+        if skills is None:
+            skills = SkillKernel.boot(config)
+            _SHARED_SKILLS[key] = skills
+        return skills
+
+
+class _LocalHTTPServer(ThreadingHTTPServer):
+    # Dashboard mounts fan out to many routes before request threads can drain
+    # the accept queue. The stdlib's five-slot queue resets these local bursts.
+    request_queue_size = 128
+    continuous_supervisor = None
+
+    def server_close(self) -> None:
+        if getattr(self,"run_effects_stop",None) is not None:self.run_effects_stop.set()
+        if self.continuous_supervisor is not None:
+            self.continuous_supervisor.shutdown()
+        if getattr(self, "mcp_config", None) is not None:
+            from ..mcp.bridge import close_workspace
+            from ..mcp.openai_tunnel import stop
+            stop(self.mcp_config)
+            close_workspace(self.mcp_config.paths.root)
+        super().server_close()
+
+
+def build_server(
+    config: Config,
+    host: str = "127.0.0.1",
+    port: int = 18317,
+    *,
+    start_cron: bool = True,
+    start_continuous: bool = True,
+) -> ThreadingHTTPServer:
+    _collect_routes()
+    startup_client = InternalClient.from_config(config)
+    routes_gateway.launch_configured_gateways_on_start(startup_client)
+    routes_network.launch_configured_tunnels_on_start(startup_client)
+    # Install built-in data-source sync contributors so ``/data-sources/sync-now``
+    # actually refreshes the ledger (notebook, model catalog, gateway registry,
+    # paper account, public market clients). See
+    # ``nerya.data_sources.sync_contributors`` for the canonical list.
+    try:
+        from ..data_sources import sync_contributors as _sync_contributors
+        _sync_contributors.install_default_contributors()
+        _sync_contributors.seed_additional_rows(startup_client)
+    except Exception:  # pragma: no cover - defensive
+        log.exception("failed to install data-source sync contributors")
+    if start_cron:
+        _start_cron_scheduler(startup_client)
+        _start_account_refresh_loop(startup_client)
+        _start_live_order_poller(startup_client)
+        _start_idle_gc_reaper(startup_client)
+
+    class Handler(BaseHTTPRequestHandler):
+        def _cors(self) -> None:
+            # The dashboard normally goes through its own /api/proxy so this
+            # is only useful for local dev tools / curl (loopback origins).
+            for key, value in _cors_headers(self):
+                self.send_header(key, value)
+
+        def _write(self, status: int, body: dict[str, Any]) -> None:
+            data = json.dumps(_json_safe(body), default=str, allow_nan=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            if status == 429:
+                self.send_header("Cache-Control", "no-store")
+                retry_after = body.get("retry_after_s")
+                if isinstance(retry_after, (int, float)) and math.isfinite(retry_after) and retry_after >= 0:
+                    self.send_header("Retry-After", str(math.ceil(retry_after)))
+            self._cors()
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _mcp(self):
+            from ..mcp.bridge import handle_http
+            return handle_http(self, config)
+
+        def do_DELETE(self):  # noqa: N802
+            if not self._mcp():
+                self._write(404, {"error": "not_found"})
+
+        def do_OPTIONS(self):  # noqa: N802
+            if self._mcp():
+                return
+            self.send_response(204)
+            self._cors()
+            self.end_headers()
+
+        def _read_body(self) -> dict[str, Any]:
+            length = int(self.headers.get("Content-Length") or 0)
+            if not length:
+                return {}
+            raw = self.rfile.read(length).decode("utf-8") or "{}"
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {"_raw": raw}
+
+        def _collect_headers(self) -> dict[str, str]:
+            return {k.lower(): v for k, v in self.headers.items()}
+
+        def _check_auth(self, method: str, path: str):
+            client_addr = (
+                self.client_address[0]
+                if isinstance(self.client_address, tuple)
+                else str(self.client_address)
+            )
+            result = auth_mod.check_request(
+                config,
+                method=method,
+                path=path,
+                client_addr=client_addr,
+                headers=self._collect_headers(),
+            )
+            if result.ok:
+                result = auth_mod.authorize_route(
+                    config,
+                    result,
+                    method=method,
+                    path=path,
+                    client_addr=client_addr,
+                )
+            if result.ok and (path == "/agent/interactions/respond" or path == "/agent/run_turn_internal" or path == "/agent/commands" or path.startswith("/agent/commands/")):
+                expected = str(
+                    os.environ.get("NERYA_DASHBOARD_INTERNAL_TOKEN")
+                    or config.get("runtime.auth.dashboard_internal_token")
+                    or ""
+                ).strip()
+                presented = self.headers.get(_DASHBOARD_INTERNAL_HEADER, "").strip()
+                if not expected or not presented or not hmac.compare_digest(presented, expected):
+                    result = auth_mod.AuthResult(
+                        ok=False, status=403, actor="unknown",
+                        reason="dashboard_internal_assertion_required",
+                    )
+            return result
+
+        def do_GET(self):  # noqa: N802
+            if self._mcp():
+                return
+            from urllib.parse import parse_qs, urlparse
+            parsed = urlparse(self.path)
+            auth = self._check_auth("GET", parsed.path)
+            if not auth.ok:
+                self._write(auth.status, {
+                    "error": "unauthorized",
+                    "reason": auth.reason,
+                })
+                return
+            handler, path_params = _match("GET", parsed.path)
+            if not handler:
+                self._write(404, {"error": "not_found", "path": self.path})
+                return
+            query = {k: v[0] if len(v) == 1 else v
+                     for k, v in parse_qs(parsed.query).items()}
+            query.update(path_params)
+            try:
+                result = handler(_memory_request_client(config, auth, parsed.path), query)
+                if isinstance(result, StreamingResponse):
+                    result.run(self)
+                elif isinstance(result, BinaryResponse):
+                    result.run(self)
+                else:
+                    status, body = _status_body_from_result(result)
+                    self._write(status, body)
+            except Exception as exc:  # pragma: no cover
+                limited = _rate_limit_response(exc)
+                if limited is not None:
+                    log.warning("Provider rate limited: %s", exc, exc_info=True)
+                    self._write(429, limited)
+                else:
+                    self._write(500, {"error": f"{type(exc).__name__}: {exc}"})
+
+        def do_POST(self):  # noqa: N802
+            if self._mcp():
+                return
+            path_only = self.path.split("?")[0]
+            auth = self._check_auth("POST", path_only)
+            if not auth.ok:
+                self._write(auth.status, {
+                    "error": "unauthorized",
+                    "reason": auth.reason,
+                })
+                return
+            handler, path_params = _match("POST", path_only)
+            if not handler:
+                self._write(404, {"error": "not_found", "path": self.path})
+                return
+            try:
+                payload = self._read_body()
+                if path_params:
+                    payload = {**payload, **path_params}
+                if path_only in _TRUSTED_AUTH_PAYLOAD_PATHS or path_only.startswith(("/agent/runs", "/agent/tasks", "/financial/")):
+                    payload = _stamp_trusted_auth(payload, auth)
+                result = handler(
+                    _memory_request_client(config, auth, path_only),
+                    payload,
+                )
+                if isinstance(result, StreamingResponse):
+                    result.run(self)
+                elif isinstance(result, BinaryResponse):
+                    result.run(self)
+                else:
+                    status, body = _status_body_from_result(result)
+                    self._write(status, body)
+            except Exception as exc:  # pragma: no cover
+                limited = _rate_limit_response(exc)
+                if limited is not None:
+                    log.warning("Provider rate limited: %s", exc, exc_info=True)
+                    self._write(429, limited)
+                    return
+                import traceback
+                tb = traceback.format_exc()
+                self._write(500, {
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "trace": tb.splitlines()[-12:],
+                })
+
+        def log_message(self, fmt, *args):  # silence default logging
+            return
+
+    server = _LocalHTTPServer((host, port), Handler)
+    server.mcp_config = config
+    if start_cron:
+        from ..sdk.run_effects import start
+        server.run_effects_stop=start(config)
+    from ..mcp.openai_tunnel import restore
+    restore(config, api_port=server.server_address[1])
+    from ..strategies.continuous import get_continuous_supervisor
+    server.continuous_supervisor = get_continuous_supervisor(config)
+    if start_continuous:
+        server.continuous_supervisor.restore()
+    return server
+
+
+def serve(config: Config, host: str = "127.0.0.1", port: int = 18317) -> None:
+    srv = build_server(config, host=host, port=port)
+    print(f"[nerya] local api on http://{host}:{port}")
+    try:
+        srv.serve_forever()
+    finally:
+        srv.server_close()

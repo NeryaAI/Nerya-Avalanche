@@ -1,0 +1,117 @@
+# Release truth gate.
+#
+# This workflow is the CI surface of the production-readiness audit
+#
+# It runs two jobs on every PR and on every push to `main`:
+#
+# * `truth-gate` — the focused production assertions.
+# * `regression` — the complete pytest suite.
+#
+# Both jobs delegate to the same script (`scripts/run_truth_gate.sh`)
+# so operators can reproduce CI locally with:
+#
+#   bash scripts/run_truth_gate.sh          # full gate
+#   bash scripts/run_truth_gate.sh --quick  # truth-gates only
+#
+# This validates the checked contracts, not live market/provider behavior.
+
+name: truth-gate
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: truth-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  truth-gate:
+    name: truth gates
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/python
+
+      - name: Install runtime + dev deps
+        run: |
+          uv pip install --constraint desktop/requirements.lock -e '.[dev,mcp,trading,prediction,browser]'
+          python scripts/release_version.py
+
+      - name: Verify pinned prediction signer is present
+        run: |
+          python -c "import importlib.metadata, polymarket; assert importlib.metadata.version('polymarket-client') == '0.12.0'"
+
+      - name: Check agent runtime imports and names
+        run: >-
+          ruff check --select F
+          nerya/ tests/
+
+      - name: Build and verify distributions
+        run: |
+          python -m build
+          python scripts/verify_distribution.py dist
+
+      - name: Run + truth gates (quick)
+        run: bash scripts/run_truth_gate.sh --quick
+
+  dashboard:
+    name: dashboard typecheck + lint + build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install workspace deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck --workspace @nerya/dashboard
+
+      - name: Translation contracts
+        run: npm run check:i18n --workspace @nerya/dashboard
+
+      - name: Chat cache and workspace recovery regressions
+        working-directory: dashboard
+        run: node --test tests/workspace-history-cache.test.cjs tests/workspace-drafts.test.cjs tests/external-native.test.cjs
+
+      - name: Lint
+        run: npm run lint --workspace @nerya/dashboard
+
+      - name: Build
+        run: npm run build --workspace @nerya/dashboard
+
+  regression:
+    name: full regression
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/python
+
+      - name: Install runtime + dev + trading extras
+        run: |
+          uv pip install --constraint desktop/requirements.lock -e '.[dev,mcp,trading,prediction,browser]'
+
+      - name: Run full regression
+        run: bash scripts/run_truth_gate.sh

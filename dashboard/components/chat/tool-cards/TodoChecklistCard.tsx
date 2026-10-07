@@ -1,0 +1,215 @@
+"use client";
+import { Icon as NeryaGlyph } from "../../icons";
+
+import { useTranslations } from "next-intl";
+import type { NativeBlock } from "../../../lib/chat";
+import { Tag, ToolRowCard } from "./atoms";
+import { recordOf } from "./helpers";
+
+export type TodoStatus =
+  | "pending"
+  | "in_progress"
+  | "completed"
+  | "cancelled"
+  | string;
+
+export interface TodoItemShape {
+  id?: string;
+  content?: string;
+  activeForm?: string;
+  active_form?: string;
+  status?: TodoStatus;
+}
+
+/**
+ * ``todo_write`` shape — both ``payload.todos`` (tool_use) and
+ * ``result.todos`` / ``result.content[1].input.todos`` (tool_result)
+ * can carry the list. We try them in order so the renderer always
+ * grabs the freshest representation regardless of which envelope side
+ * it sees.
+ */
+export function todosFromBlock(block: NativeBlock): TodoItemShape[] {
+  const payload = recordOf(block.payload);
+  const result = recordOf(block.result);
+  const candidates: unknown[] = [
+    payload.todos,
+    result.todos,
+    (result.content as unknown[] | undefined)?.flatMap?.((c) => {
+      const r = recordOf(c);
+      const inner = recordOf(r.input);
+      return inner.todos ?? [];
+    }) ?? null,
+  ];
+  for (const c of candidates) {
+    if (Array.isArray(c) && c.length) {
+      return c.filter(
+        (row): row is TodoItemShape => !!row && typeof row === "object",
+      );
+    }
+  }
+  return [];
+}
+
+function todoStatusMeta(
+  status: TodoStatus,
+  labels: {
+    done: string;
+    inProgress: string;
+    cancelled: string;
+    pending: string;
+  },
+): {
+  label: string;
+  tone: "neutral" | "ok" | "warn" | "err" | "brand";
+  glyph: string;
+  ring: string;
+  fill: string;
+} {
+  switch (status) {
+    case "completed":
+      return {
+        label: labels.done,
+        tone: "ok",
+        glyph: "\u2713",
+        ring: "border-emerald-400/50",
+        fill: "bg-emerald-400/15 text-emerald-300",
+      };
+    case "in_progress":
+      return {
+        label: labels.inProgress,
+        tone: "brand",
+        glyph: "\u25B6",
+        ring: "border-brand-400/60",
+        fill: "bg-brand-400/15 text-brand-200",
+      };
+    case "cancelled":
+      return {
+        label: labels.cancelled,
+        tone: "warn",
+        glyph: "/",
+        ring: "border-ink-500/60",
+        fill: "bg-ink-700/40 text-ink-400 line-through",
+      };
+    case "pending":
+    default:
+      return {
+        label: labels.pending,
+        tone: "neutral",
+        glyph: "",
+        ring: "border-brand-500/25",
+        fill: "bg-brand-500/[0.05] text-ink-200",
+      };
+  }
+}
+
+export function TodoChecklistCard({
+  todos,
+  pending = false,
+}: {
+  todos: TodoItemShape[];
+  pending?: boolean;
+}) {
+  const t = useTranslations("todoChecklistCard");
+  const total = todos.length;
+  const completed = todos.filter((t) => t.status === "completed").length;
+  const inProgress = todos.find((t) => t.status === "in_progress");
+  const progress = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const statusLabels = {
+    done: t("statusDone"),
+    inProgress: t("statusInProgress"),
+    cancelled: t("statusCancelled"),
+    pending: t("statusPending"),
+  };
+  return (
+    <ToolRowCard
+      icon={
+        <NeryaGlyph name="circleCheck" size={16} />
+      }
+      title={
+        <span className="inline-flex min-w-0 items-center gap-1.5">
+          <span>{t("title")}</span>
+          {pending ? (
+            <span className="inline-flex items-center gap-1 text-[10px] text-fluid-400">
+              <span className="typing-dot" />
+              <span>{t("updating")}</span>
+            </span>
+          ) : null}
+        </span>
+      }
+      subtitle={
+        inProgress?.activeForm || inProgress?.active_form
+          ? String(inProgress.activeForm || inProgress.active_form)
+          : total > 0
+          ? `${completed}/${total}`
+          : t("empty")
+      }
+      tone="brand"
+      defaultOpen={pending}
+      meta={
+        <>
+          <Tag tone="brand">{t("doneCount", { completed, total })}</Tag>
+          {inProgress?.activeForm || inProgress?.active_form ? (
+            <Tag tone="brand">
+              {String(inProgress.activeForm || inProgress.active_form).slice(0, 32)}
+            </Tag>
+          ) : null}
+        </>
+      }
+    >
+      {total > 0 ? (
+        <div className="h-1.5 rounded-full bg-ink-900/70 border border-brand-500/10 overflow-hidden">
+          <div
+            className="h-full rounded-full bg-brand-300/80 transition-all"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      ) : null}
+      <ul className="space-y-1.5">
+        {todos.length === 0 ? (
+          <li className="text-[12px] text-ink-400 italic">{t("empty")}</li>
+        ) : null}
+        {todos.map((todo, i) => {
+          const meta = todoStatusMeta(String(todo.status || "pending"), statusLabels);
+          return (
+            <li
+              key={String(todo.id || i)}
+              className={`flex items-start gap-2.5 rounded-xl px-2.5 py-2 transition-colors ${
+                todo.status === "completed"
+                  ? "bg-emerald-400/[0.04]"
+                  : todo.status === "in_progress"
+                  ? "bg-brand-400/[0.06]"
+                  : ""
+              }`}
+            >
+              <span
+                className={`mt-[2px] inline-flex items-center justify-center w-4 h-4 shrink-0 rounded-md border text-[10px] font-medium leading-none ${meta.ring} ${meta.fill}`}
+                aria-hidden
+              >
+                {meta.glyph ? <NeryaGlyph name={todo.status === 'completed' ? 'check' : todo.status === 'in_progress' ? 'play' : 'x'} size={12} /> : null}
+              </span>
+              <div className="flex-1 min-w-0">
+                <div
+                  className={`text-[12.5px] leading-snug ${
+                    todo.status === "completed"
+                      ? "text-ink-400 line-through"
+                      : todo.status === "cancelled"
+                      ? "text-ink-500 line-through"
+                      : "text-ink-100"
+                  }`}
+                >
+                  {String(todo.content || todo.activeForm || todo.active_form || "")}
+                </div>
+                {todo.status === "in_progress" && (todo.activeForm || todo.active_form) ? (
+                  <div className="mt-0.5 text-[10.5px] text-brand-200/80">
+                    {String(todo.activeForm || todo.active_form)}
+                  </div>
+                ) : null}
+              </div>
+              <Tag tone={meta.tone}>{meta.label}</Tag>
+            </li>
+          );
+        })}
+      </ul>
+    </ToolRowCard>
+  );
+}
