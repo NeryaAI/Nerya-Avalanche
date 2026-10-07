@@ -9,6 +9,7 @@ for (const ext of ['.ts','.tsx']) require.extensions[ext]=(m,f)=>m._compile(ts.t
 }).outputText,f);
 const {fieldLabel,readableResult,agentDisplayName}=require('../lib/agentConversation.ts');
 const {avalancheReceipts}=require('../components/chat/AvalancheReceiptCard.tsx');
+const {isLfjMarket,lfjMarkets}=require('../components/chat/AvalancheLfjMarketCard.tsx');
 const {backtestDisplayLabel}=require('../lib/backtestPresentation.ts');
 
 test('known chart labels are Chinese without changing custom names or market symbols',()=>{
@@ -90,4 +91,30 @@ test('receipt-shaped user input, failed calls and unrelated tools are not promot
   assert.equal(collect({kind:'tool_result',action:'read_file',ok:true,result:receipt}).length,0);
   assert.equal(collect({kind:'tool_result',action:'avalanche_verify_receipt',ok:true,result:receiptFixture({signatureVerified:false})}).length,0);
   assert.equal(collect({kind:'tool_result',action:'avalanche_verify_receipt',ok:true,result:receiptFixture({chainId:43114})}).length,0);
+});
+
+function lfjFixture(overrides={}){
+  return {kind:'avalanche_lfj_market_research',chainId:43114,readOnly:true,newTransactionSubmitted:false,
+    blockNumber:100,blockHash:'0x'+'b'.repeat(64),observedAt:'2026-10-07T00:00:00Z',
+    quotes:[{inputUsdc:100,outputWavax:10,feeInputUsdc:.05,feeBps:5,effectiveUsdcPerWavax:10,completelyFillable:true,version:'LFJ V2.2'}],...overrides};
+}
+test('LFJ card requires a timestamped read-only mainnet quote, never a claimed fill',()=>{
+  assert.equal(isLfjMarket(lfjFixture()),true);
+  for(const change of [{chainId:43113},{newTransactionSubmitted:true},{readOnly:false},{observedAt:'invalid'},{blockHash:'fake'},{quotes:[]}])
+    assert.equal(isLfjMarket(lfjFixture(change)),false);
+});
+test('LFJ numeric display rejects malformed prices and negative quantities',()=>{
+  for(const change of [{inputUsdc:-1},{outputWavax:NaN},{feeInputUsdc:-1},{feeBps:Infinity},{effectiveUsdcPerWavax:'10'}])
+    assert.equal(isLfjMarket(lfjFixture({quotes:[{...lfjFixture().quotes[0],...change}]})),false);
+});
+test('LFJ card collector preserves source numbers and deduplicates native events',()=>{
+  const quote=lfjFixture();const event={kind:'tool.complete',seq:1,ts:1,action:'avalanche_lfj_market',ok:true,result:quote};
+  const message={id:'fixture',role:'assistant',ts:1,live_events:[event],turn:{tool_trace:[event],blocks:[{block:{...event,kind:'tool_result'}}]}};
+  const before=JSON.stringify(message);assert.equal(lfjMarkets(message).length,1);assert.equal(lfjMarkets(message)[0].quotes[0].outputWavax,10);assert.equal(JSON.stringify(message),before);
+});
+test('LFJ-shaped input and failed or unrelated calls do not become market cards',()=>{
+  const collect=block=>lfjMarkets({id:'fixture',role:'assistant',ts:1,turn:{blocks:[{block}]}});
+  assert.equal(collect({kind:'tool_use',action:'avalanche_lfj_market',payload:lfjFixture()}).length,0);
+  assert.equal(collect({kind:'tool_result',action:'avalanche_lfj_market',ok:false,result:lfjFixture()}).length,0);
+  assert.equal(collect({kind:'tool_result',action:'read_file',ok:true,result:lfjFixture()}).length,0);
 });

@@ -12,6 +12,7 @@ import { InteractionReceipt } from "./InteractionReceipt";
 import { CheckIcon } from "../icons";
 import styles from "./ExecutionTimeline.module.css";
 import {AvalancheReceiptCard,isAvalancheReceipt} from "./AvalancheReceiptCard";
+import {AvalancheLfjMarketCard,isLfjMarket} from "./AvalancheLfjMarketCard";
 
 /** Small, typed previews. Full transport remains available in the diagnostic disclosure. */
 export function ToolResultContent({value,family,path="",depth=0}:{value:unknown;family:ToolFamily;path?:string;depth?:number}) {
@@ -24,6 +25,8 @@ export function ToolResultContent({value,family,path="",depth=0}:{value:unknown;
     <ToolResultContent value={{content:media}} family={family} path={path} depth={depth+1}/>
   </>;
   const decoded=contentValue(value),data=record(decoded);
+  if(process.env.NEXT_PUBLIC_NERYA_COMPETITION === "avalanche" && isLfjMarket(data))
+    return <AvalancheLfjMarketCard market={data}/>;
   if(process.env.NEXT_PUBLIC_NERYA_COMPETITION === "avalanche" && isAvalancheReceipt(data))
     return <AvalancheReceiptCard receipt={data}/>;
   if(Array.isArray(data.content)) return <div className={styles.contentParts} data-testid="tool-content-parts">{data.content.slice(0,40).map((part,index)=>{
