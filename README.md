@@ -1,57 +1,153 @@
-# Nerya · Avalanche 原生智能体比赛版
+<div align="center">
 
-这是 `NeryaAI/Nerya` 的独立比赛代码快照，默认分支 `competition/avalanche-2026`。
-保留原来的中文 Agent 对话、协作成员、策略与回测卡片、行情成交和独立复盘工作区；不以第二套比赛 Dashboard 代替产品。
+<img src="branding/logo.png" alt="Nerya" width="88" />
 
-## 仓库范围
+# Nerya
 
-仅包含应用代码、测试、必要的构建配置、原生 UI 资源、文档和策略示例。
-不包含录屏、PPT、旁白、研究数据、回测结果、对话、模型密钥、钱包、控制 token 或运行目录。
-这不是旧分支的 Git 历史镜像；创建新历史，避免把历史媒体或本机状态带入仓库。
+### One idea. A team to build it.
 
-## 本地安装与隔离启动
+Your local Agent strategy workspace — research, build, backtest and review in one conversation.
 
-使用 Node 22–26、Python 3.12 和 uv，从本仓库根目录执行：
+**1.0.0 Beta** · `1.0.0-beta.1`
+
+[English](README.md) · [简体中文](README.zh-CN.md)
+
+[Website](https://neryaai.github.io/) · [Documentation](https://neryaai.github.io/docs.html) · [Desktop downloads](https://github.com/NeryaAI/Nerya/releases) · [Build status](https://github.com/NeryaAI/Nerya/actions/workflows/desktop.yml)
+
+[![Desktop CI](https://github.com/NeryaAI/Nerya/actions/workflows/desktop.yml/badge.svg)](https://github.com/NeryaAI/Nerya/actions/workflows/desktop.yml)
+[![Version](https://img.shields.io/badge/version-1.0.0--beta.1-7961e8)](VERSION)
+[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](LICENSE)
+
+</div>
+
+Describe your trading idea and its constraints. Nerya brings researchers, strategy authors and reviewers into the same workspace. Follow the tools as they run, inspect the evidence, open the strategy and backtest details, and decide what happens next.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="branding/screenshots/1.0.0-beta/strategy-en-dark.gif" />
+  <img src="branding/screenshots/1.0.0-beta/strategy-en-light.gif" alt="Nerya strategy conversation and workflow, English" width="100%" />
+</picture>
+
+*Recorded from the website's isolated product tour. It uses example data, not a live account or verified investment performance. [Recording provenance](branding/screenshots/1.0.0-beta/README.md).*
+
+## From idea to a traceable workflow
+
+**Build a strategy.** Describe the market, entry and exit logic, time horizon and constraints. Agents prepare the strategy package and validate it. Script strategies, script-driven Agent strategies and event-driven Agent strategies share the workspace, with readable workflow nodes, parameters and run history.
+
+**Research as a team.** Delegate market data, news and technical research to specialized Agents. A reviewer can challenge assumptions while the lead combines the evidence. Open source material and research reports without losing the conversation.
+
+**Inspect more than a text reply.** Strategy cards, backtest curves, market charts and research reports are part of the conversation. Open their details in workspace tabs. Backtest views include available candle history, entry/exit markers, protection levels, trades and execution evidence; missing data remains visible rather than being presented as a complete result.
+
+**Review and iterate.** Inspect a particular run and its logs before changing a strategy. Optional review schedules produce evidence-linked recommendations and candidate changes. Review and trading authorization are distinct from editing ordinary Skill or Agent resources: those resources can be edited and saved directly.
+
+**Keep the workspace local.** Strategies, cached market history, reports and configuration live in your workspace. Credentials are stored encrypted in the local Vault and referenced by identifier. Configured model providers, market services and external tools still receive the requests needed to perform your tasks; local storage does not make those services offline.
+
+## What is in 1.0.0 Beta?
+
+| Area | In the workspace |
+| --- | --- |
+| Agent conversation | Streaming replies, available thinking output, tool execution, progress, follow-up messages and recoverable errors |
+| Strategies | Script and Agent execution, timer/event workflow nodes, strategy editing, import/export and run details |
+| Backtesting | Reusable local historical data, preflight checks, coverage information, per-market charts and trade records |
+| Research | Market cards, technical charts, evidence-linked reports and multi-Agent research |
+| Skills & Agents | `SKILL.md` playbooks, lazy-loaded references, reusable scripts and direct resource editing |
+| Integrations | Configurable model providers, exchange/wallet connections, MCP and external Agent access |
+| Desktop | Tauri host with bundled Python, Node, the web workspace and Chromium; native build pipelines for three operating systems |
+| Interface | English/Chinese, light/dark themes, workspace tabs and settings-based account/model configuration |
+
+Research categories and execution support are not interchangeable. Crypto exchanges use the configured connectors; wallet and prediction-market operations depend on the relevant provider and credentials. Futures and A-share research examples do not imply that every broker, order type or instrument is executable.
+
+## Avalanche & LFJ
+
+Avalanche is an additional market surface inside the same Nerya Agent workspace, not a separate dashboard or runtime.
+
+- Avalanche C-Chain (`43114`) is supported by Nerya's normal EVM, wallet and on-chain data layers.
+- The built-in `avalanche_lfj_market` tool reads the current LFJ Router and V2.1/V2.2 USDC/WAVAX pools, compares order sizes at one block, and returns the result as a native chat card.
+- LFJ market reads are deliberately quote-only: they do not load a signer, approve tokens or broadcast a transaction. A quote must be refreshed before any execution decision.
+- `examples/avalanche/avax_breakout_zh/` is a normal Nerya strategy package showing a daily AVAX breakout workflow with percentage-of-NAV sizing, backtesting and review configuration.
+
+Live execution still goes through Nerya's existing account, risk and approval gates. The first-party LFJ adapter in this repository focuses on market discovery and quoting; it does not enable unattended Avalanche mainnet trading by itself.
+
+## Install the desktop app
+
+Choose a **completed release** on [GitHub Releases](https://github.com/NeryaAI/Nerya/releases), then download the installer matching your operating system and CPU.
+
+| Platform | Architecture | Release files |
+| --- | --- | --- |
+| macOS | Apple Silicon / ARM64 | `.dmg`, `.pkg` |
+| macOS | Intel / x64 | `.dmg`, `.pkg` |
+| Windows | x64 | NSIS `.exe`, Windows Installer `.msi` |
+| Linux | x64 | `.deb`, `.AppImage` |
+
+Desktop installers contain the application's Python and Node runtimes, web server and browser engine. You do not need to install a development toolchain to use them. Windows installers include the offline WebView2 installer. Linux still depends on distribution-provided desktop/browser libraries; the build baseline is Ubuntu 22.04. See [desktop installation and build notes](desktop/README.md).
+
+The beta pipeline uses an ad-hoc macOS signature and unsigned Windows packages unless a separate signing process is supplied. These are **not** notarized Apple Developer ID releases or Windows reputation-approved installers. Follow your organization's security policy; do not disable OS security protections to install an untrusted build.
+
+On first launch, configure a model, add an account when needed, and configure the administrator password for external access. New workspaces contain **no default strategies or scheduled trades**. The account, model and access settings remain available afterward in Settings. Upgrades do not silently erase an existing workspace.
+
+## Try a first task
+
+> Research BTC/USDT using the available historical data. Build a script strategy with explicit entry and exit rules, validate it, and run a historical backtest. Show the strategy workflow, data coverage and trade details. Do not start live trading.
+
+Or ask for a research-only result:
+
+> Compare BTC and ETH market conditions. Split the research between price action and news, cite the evidence, and produce a report with market charts. Explain any missing data.
+
+Model access and market-data availability depend on your configured services. A backtest is historical simulation, not a promise of future performance. Inspect the strategy code, parameters, coverage, fees and trading permissions before execution.
+
+## Run from source
+
+The source workflow is for developers and server deployments. Use the Node and Python versions pinned in `.node-version` and `.python-version`.
 
 ```bash
+git clone https://github.com/NeryaAI/Nerya-Avalanche.git
+cd Nerya-Avalanche
+uv venv
+uv pip install -e ".[dev,mcp,trading,prediction,browser]"
 npm ci
-npm --prefix competition/avalanche ci
-uv venv --python 3.12 .venv-competition
-uv pip install --python .venv-competition/bin/python -e '.[dev,trading]'
-npx playwright install chromium
-.venv-competition/bin/python competition/avalanche/scripts/start.py --model-source /absolute/path/to/your/configured/nerya-workspace
+npm --prefix desktop ci
 ```
 
-模型来源工作区需要已有可用的模型配置。启动器仅选择模型资料，凭证在内存中解析；不复制原工作区的账户、聊天、定时任务或交易钱包。
-不要将模型来源路径写成其他人的本机目录，也不要将密钥提交到 Git。
-原生入口 `http://127.0.0.1:18480/chat`，API `18417`。正常产品的 `18317/18380` 不被该启动器停止。
-首次运行是空的隔离工作区，不会预填演示里的聊天或收益结果。
-
-## 策略与验证
-
-`examples/avalanche/avax_breakout_zh/` 是原生智能体实际创建的日线突破候选源码：前20日高点突破入场、前10日低点跌破退出、85%净值入场，不做空、不加杠杆。
-示例是未发布的模拟策略，不保证收益。交易信号只读取当时已收盘的历史前缀，回测使用下一开盘成交。
-回测需要本地重新取得数据并执行，不能把历史研究值当成新运行结果；CEX价格代理也不是LFJ池子的历史成交模型。
+For desktop development:
 
 ```bash
-.venv-competition/bin/python -m pytest -m '' -q competition/avalanche/tests_native
-.venv-competition/bin/python -m pytest -m '' -q examples/avalanche/avax_breakout_zh/tests
-npm --prefix competition/avalanche test
-(cd dashboard && ./node_modules/.bin/tsc --noEmit --incremental false)
+npm --prefix desktop run dev
 ```
 
-`research-market.py`、`research-backtests.py`、`research-lfj-mainnet.mjs`、`verify-research.py` 和 `build-research-report.py` 保留复现实验代码；运行生成的数据位于已忽略的 research 目录，不随本仓库发布。
-`avalanche_strategy_research` 在缺少本地已核对研究文件时明确返回不可用，不虚构结果。
-`avalanche_verify_receipt` 同样需要本地提供独立生成的真实历史证明文件；本仓库不预装任何用户的历史交易档案。
+The desktop launcher manages its local services. A source build additionally requires Rust and the platform's native build dependencies. For a web-only deployment, use the existing [CLI and MCP guide](MCP.md) and `nerya --help`; the web dashboard remains independent of Tauri.
 
-## 执行边界
+## Build, verify and release
 
-默认仅模拟交易，主网广播关闭；LFJ主网研究工具只读。Fuji是测试网，不是主网利润证明。
-策略候选保存不等于发布，复盘计划不等于复盘已执行，生成修订不等于已采用。
-在本轮录制时，第二版修订仍待安全复核，不能据此宣称已完成自进化闭环。
-合约原型未经安全审计，不用于真实资金托管。
+```bash
+python scripts/release_version.py
+npm run typecheck --workspace @nerya/dashboard
+npm run check:i18n --workspace @nerya/dashboard
+python -m unittest discover -s desktop/tests -v
+npm --prefix desktop run build
+python desktop/scripts/verify_runtime.py
+python desktop/scripts/smoke.py --access-port 0
+```
 
-## 来源与许可
+Run Python commands in the project virtual environment. macOS additionally provides `node desktop/scripts/installer.mjs` after building the app. [The desktop guide](desktop/README.md) contains exact native bundle commands and installer-payload checks.
 
-保留上游 LICENSE。上游项目：NeryaAI/Nerya；本代码取自比赛分支的工作树快照。
-视频、MiMo旁白、中文PPT和验证材料单独交付，不放入代码仓库。
+The [desktop workflow](.github/workflows/desktop.yml) builds on Windows, Linux, Apple Silicon macOS and Intel macOS separately. It checks version consistency, locked dependencies, frontend types, Python distribution contents, desktop unit tests and the packaged runtime. Installer payload smoke tests use temporary workspaces and fake credentials, without calling a model or placing a trade. A build is not considered verified merely because the Rust compiler exits successfully.
+
+Push a tag matching `VERSION` (for example `v1.0.0-beta.1`) to request a release. Only after the required workflow jobs succeed does the release job publish the installers, SHA-256 checksums and build metadata. Normal pushes and pull requests build artifacts but do not publish a release. Native notification prompts, OS trust dialogs and broker-specific live execution still require their own acceptance testing.
+
+## Project layout
+
+```text
+nerya/              Python Agent runtime, APIs, connectors and trading services
+nerya/skills/       Built-in SKILL.md playbooks, references and executable helpers
+nerya/sdk/          Runtime strategy, trading and trigger APIs
+sdk/               Python and TypeScript client SDKs
+dashboard/         Next.js conversation and strategy workspace
+desktop/           Tauri shell, portable runtime packaging and native smoke tests
+tests/             Runtime regression tests
+.github/workflows/ Validation, native desktop builds and release publication
+```
+
+## Security and licensing
+
+Live execution requires the corresponding configuration and authorization; do not bypass the trading risk and approval gates. Vault encryption protects stored credentials, not a compromised running process. Keep backups of your workspace and its encryption key, and never commit account secrets, `.env` files or live trading state.
+
+Nerya is licensed under [PolyForm Noncommercial 1.0.0](LICENSE). Commercial use requires a separate license. Bundled third-party components retain their own licenses. This beta is software for research and strategy operations, not investment advice or a guarantee against financial loss.

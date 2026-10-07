@@ -28,7 +28,6 @@ export function lfjMarkets(message:AssistantMessage):LfjMarket[] {
 }
 
 export function LfjReplyCards({message}:{message:AssistantMessage}) {
-  if(process.env.NEXT_PUBLIC_NERYA_COMPETITION!=="avalanche")return null;
   return <>{lfjMarkets(message).map(market=><AvalancheLfjMarketCard key={market.blockHash} market={market}/>)}</>;
 }
 

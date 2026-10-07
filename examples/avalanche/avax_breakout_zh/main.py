@@ -2,11 +2,11 @@
 # @nerya.title AVAX 日线突破
 # @nerya.description 日线收盘后判断突破/跌破信号，下一根开盘按85%净资产开多或全平（由原生回测引擎按下一开盘成交假设执行）。
 # @nerya.logic 只使用已收盘日线K线：close > 不含当前日的前20日最高high 且空仓 -> 开多；close < 不含当前日的前10日最低low 且持有多仓 -> 全平；其余持有或空仓。
-# @nerya.rationale 复用既有2026-10-07研发复核输入的固定规则（20日突破/10日退出），本候选不优化任何参数。
+# @nerya.rationale 使用固定的20日突破/10日退出规则展示 AVAX 趋势策略，不在示例中做参数寻优。
 # @nerya.scope 仅配置市场 BINANCE:AVAXUSDT 与1d周期；不修改任何账户或全局配置。
 # @nerya.input 已收盘历史或实时K线（ctx.market.candles）、strategy.yml 声明参数（ctx.config.params）、已结算持仓（ctx.portfolio）。
 # @nerya.output 入场/平仓订单提交回执，或显式 hold/错误结果。
-# @nerya.risk 历史OHLC与下一开盘成交假设不保证实盘可执行或盈利；回测价格代理（币安）不代表 Avalanche 主网 LFJ 历史成交或实盘收益；LFJ 执行的 gas 与额外滑点未计入原生引擎结果。
+# @nerya.risk 历史OHLC与下一开盘成交假设不保证实盘可执行或盈利；回测价格代理（币安）不代表 Avalanche 主网 LFJ 历史成交；链上 gas、动态费用和额外滑点需要在执行前独立评估。
 # @nerya.validation 保存本源码并按 strategy.yml.backtest 固定区间（2026-04-01含 至 2026-10-07不含 UTC）执行一次原生历史回测。
 # @nerya.step execute | Execute strategy | 逐市场处理已收盘日线，按突破/跌破信号提交入场或平仓。
 

@@ -1149,42 +1149,6 @@
       "028": "文件",
       "029": "条目"
     },
-    "competitionStart": {
-      "scope": "Avalanche 参赛版 · 原生智能体工作区 · 隔离测试网",
-      "team": {
-        "label": "组建 AVAX 多智能体投研团队",
-        "prompt": "请启动多智能体投研团队，从技术趋势、Avalanche 链上生态和风险三个独立方向研究 AVAX。使用真实数据，分别展示每位成员的发现，再给出适合回测的策略假设。不要下单。"
-      },
-      "strategy": {
-        "label": "用一句话创建并回测策略",
-        "prompt": "请为 AVAX 创建一个可以检查源码与工作流的趋势策略，使用 85% 净资产、保留 15% 现金，回测最近 180 天的 4 小时行情，展示收益曲线、买卖点和买入持有基准对比，并生成独立的复盘计划。先保持交易和调度关闭。"
-      },
-      "evolve": {
-        "label": "复盘并验证一个策略修订",
-        "prompt": "请根据当前策略实际回测结果进行复盘。提出一个有依据的改动，生成修订候选，用相同数据和费用再回测一次，比较改前改后并更新下一次复盘计划。不得提高风险授权或自动启用交易；没有改善也要如实报告。"
-      },
-      "proof": {
-        "label": "让智能体核验 Fuji 交易证据",
-        "prompt": "请使用 avalanche_verify_receipt 核验比赛中已完成的 Fuji PolicyVault/LFJ 交易，在原生对话里展示证据。区分历史参考交易和当前策略，不要发起新交易。"
-      }
-    },
-    "avalancheReceipt": {
-      "verified": "链上核验通过",
-      "inputAsset": "LFJ 测试 USDC",
-      "reference": "历史参考执行 · 不是当前策略的新订单",
-      "route": "执行路径",
-      "block": "区块",
-      "allowance": "执行后授权余额",
-      "executedAt": "执行时间",
-      "details": "查看授权、证据与来源",
-      "transaction": "交易哈希",
-      "vault": "策略金库合约",
-      "policy": "授权摘要",
-      "evidence": "证据摘要",
-      "strategy": "原始策略摘要",
-      "scope": "仅测试网 · 只读核验 · 未发起新交易",
-      "explorer": "公共交易回执 ↗"
-    },
     "agentResearchFields": {
       "signal": "方向判断",
       "confidence": "置信度",

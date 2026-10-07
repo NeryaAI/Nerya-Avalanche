@@ -42,7 +42,7 @@ export function fieldLabel(key: string, zh: boolean): string {
 
 /** A localized display alias, never a different runtime member identity. */
 export function agentDisplayName(name: string, zh: boolean): string {
-  if (process.env.NEXT_PUBLIC_NERYA_COMPETITION !== "avalanche" || !zh) return name;
+  if (!zh) return name;
   return ["technical", "ecosystem", "risk"].includes(name)
     ? i18nCopy(true, `copy.agentResearchRoles.${name}`) : name;
 }

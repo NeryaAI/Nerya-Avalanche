@@ -1149,42 +1149,6 @@
       "028": "Files",
       "029": "Items"
     },
-    "competitionStart": {
-      "scope": "Avalanche edition · Native Agent workspace · isolated testnet",
-      "team": {
-        "label": "Research AVAX with an Agent Team",
-        "prompt": "Launch an Agent Team to research AVAX from three independent perspectives: technical trend, Avalanche ecosystem, and risk. Use real data, summarize each member's findings, and propose one testable strategy hypothesis. Do not place orders."
-      },
-      "strategy": {
-        "label": "Create and backtest a strategy",
-        "prompt": "Create an inspectable AVAX trend strategy using 85% NAV and a 15% cash reserve. Backtest the last 180 days on 4-hour candles with an equity curve, fills and buy-and-hold comparison. Include a separate paused review plan; do not activate trading."
-      },
-      "evolve": {
-        "label": "Review and test one strategy revision",
-        "prompt": "Review this strategy's actual backtest evidence. Propose one justified revision, save a candidate, rerun the same data and costs, compare both versions, and update its review plan. Do not widen authority or activate trading; report honestly if the revision does not improve results."
-      },
-      "proof": {
-        "label": "Ask the Agent to verify Fuji evidence",
-        "prompt": "Use avalanche_verify_receipt to verify the recorded Fuji PolicyVault/LFJ testnet execution and show its evidence in this conversation. Clearly distinguish the earlier reference proof from this strategy. Do not submit a new transaction."
-      }
-    },
-    "avalancheReceipt": {
-      "verified": "Verified on-chain",
-      "inputAsset": "LFJ test USDC",
-      "reference": "Earlier reference execution · not a new order from this strategy",
-      "route": "Route",
-      "block": "Block",
-      "allowance": "Allowance after execution",
-      "executedAt": "Executed at",
-      "details": "Policy, evidence and provenance",
-      "transaction": "Transaction",
-      "vault": "PolicyVault",
-      "policy": "Policy",
-      "evidence": "Evidence",
-      "strategy": "Original strategy",
-      "scope": "Testnet only · read-only verification · no new transaction",
-      "explorer": "Public receipt ↗"
-    },
     "agentResearchFields": {
       "signal": "Signal",
       "confidence": "Confidence",

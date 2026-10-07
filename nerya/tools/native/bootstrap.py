@@ -3571,6 +3571,8 @@ def register_native_tools(
     registry.register_all(descriptors, replace=replace)
     from .financial import register_financial_tools
     register_financial_tools(registry,deps,replace=replace)
+    from .avalanche import register_avalanche_tools
+    register_avalanche_tools(registry,deps,replace=replace)
     register_skill_tool(
         registry,
         skill_index=deps.skill_index,

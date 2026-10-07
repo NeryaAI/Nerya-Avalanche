@@ -14,14 +14,7 @@ export function AgentStart({ composer, value, onChange, disabled = false }: {
   const zh = useLocale().startsWith("zh");
   const t = useTranslations("chat.agentStart");
   const topics = Object.values(t.raw("topics") as Record<string, Topic>);
-  const normalStarters = Object.values(t.raw("starters") as Record<string, Starter>);
-  const competition = process.env.NEXT_PUBLIC_NERYA_COMPETITION === "avalanche";
-  const competitionStarters: Starter[] = ["team", "strategy", "evolve", "proof"].map(key => ({
-    id: `avalanche-${key}`, topic: "suggested",
-    label: i18nCopy(zh, `copy.competitionStart.${key}.label`),
-    prompt: i18nCopy(zh, `copy.competitionStart.${key}.prompt`),
-  }));
-  const starters = competition ? [...competitionStarters,...normalStarters] : normalStarters;
+  const starters = Object.values(t.raw("starters") as Record<string, Starter>);
   const id = useId().replace(/:/g, "");
   const root = useRef<HTMLDivElement>(null);
   const [topic, setTopic] = useState("suggested");
@@ -38,7 +31,6 @@ export function AgentStart({ composer, value, onChange, disabled = false }: {
   return <div ref={root} className="flex min-h-0 flex-1 overflow-y-auto" data-testid="agent-start">
     <div className="mx-auto my-auto w-full max-w-[800px] px-4 py-8 sm:px-6 sm:py-10">
       <div className="mb-7 text-left sm:mb-8">
-        {competition?<p className="mb-3 text-xs font-medium text-[color:var(--text-muted)]" data-testid="competition-native-scope">{i18nCopy(zh, "copy.competitionStart.scope")}</p>:null}
         <h1 className="text-balance text-[26px] font-semibold tracking-tight leading-tight text-[color:var(--text-base)] sm:text-[30px]">{i18nCopy(zh, "copy.components_chat_AgentStart.001")}</h1>
         <p className="mt-3 max-w-[60ch] text-pretty text-sm leading-6 text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_AgentStart.002")}</p>
       </div>

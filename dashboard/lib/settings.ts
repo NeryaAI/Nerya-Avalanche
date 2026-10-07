@@ -59,7 +59,7 @@ export const DEFAULT_SETTINGS: UiSettings = {
   showVolume: true,
   chartType: "candlestick",
   timezone: "auto",
-  language: process.env.NEXT_PUBLIC_NERYA_COMPETITION === "avalanche" ? "zh" : "en",
+  language: "en",
   darkMode: "dark",
 };
 
@@ -68,9 +68,6 @@ const EVT = "nerya:ui_settings_changed";
 
 /** Use the browser only until the operator chooses and saves a language. */
 export function detectBrowserLanguage(): LanguagePreference {
-  // The competition's requested presentation language is Chinese. This is a
-  // default for the isolated edition; explicit saved preferences still win.
-  if (process.env.NEXT_PUBLIC_NERYA_COMPETITION === "avalanche") return "zh";
   if (typeof navigator === "undefined") return DEFAULT_SETTINGS.language;
   const languages = navigator.languages?.length ? navigator.languages : [navigator.language];
   for (const language of languages) {

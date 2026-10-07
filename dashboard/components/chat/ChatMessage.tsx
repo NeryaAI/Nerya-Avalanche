@@ -38,7 +38,6 @@ import { executionSteps, executionMembers, executionArtifacts, executionDefaultO
 import { browserCalls } from '../../lib/browserTrace';
 import { ResearchReplyCards } from './ResearchReplyCards';
 import { BacktestReplyCards } from './BacktestReplyCards';
-import { AvalancheReplyCards } from './AvalancheReceiptCard';
 import { LfjReplyCards } from './AvalancheLfjMarketCard';
 import { latestModelRetry } from '../../lib/modelRetry';
 import { ErrorCard } from './RecoveryErrorCard';
@@ -448,7 +447,6 @@ export function AssistantBubble({
     {msg.error && onContinue ? <p className="mb-3 text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_ChatMessage.023")}</p> : null}
 
     <BacktestReplyCards message={msg} />
-    <AvalancheReplyCards message={msg} />
     <LfjReplyCards message={msg} />
     {proposals.length ? <div data-turn-section="proposal-actions" className="mb-5"><StrategyProposalsHoist proposals={proposals} /></div> : null}
     {reply ? <section data-turn-section="reply" data-message-identity={msg.id} aria-busy={Boolean(msg.loading)} aria-label={i18nCopy(zh, "copy.components_chat_ChatMessage.008")}>
