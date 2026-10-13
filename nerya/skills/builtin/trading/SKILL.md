@@ -1,0 +1,72 @@
+<!-- nerya-skill-frontmatter-start -->
+---
+name: trading
+description: "Use to size positions, place trades, review portfolio state, manage open risk, or move strategies through lifecycle gates. The agent can never switch live trading on: 'go live / 打开 live' requests get an explicit reject — live stays off, offer paper mode — never a strategy proposal as a substitute."
+version: 0.2.0
+license: MIT
+author: Nerya
+---
+<!-- nerya-skill-frontmatter-end -->
+
+# Trading
+
+Use financial_readiness to distinguish implemented, configured and live-ready
+capabilities. For mainstream DEX/DeFi and prediction settlement load
+financial_ops and its mainstream-defi reference. Do not default new strategies
+to Byreal or infer LP support from a swap router's name.
+
+Use only after fresh market/account context exists. Live trading still
+requires runtime flags and approval gates.
+
+## Flow
+
+FETCH current market state with `markets`.
+READ portfolio, exposure, PnL, and account constraints.
+FORM intent: side, market, size, order type, rationale, stop/exit.
+RUN risk check before execution.
+IF live or high-risk, require approval gate.
+SUBMIT only through trading runtime surfaces.
+RECONCILE fills and report state changes.
+
+## Saved strategy sizing
+
+For a strategy, honor its saved `params.sizing`; never substitute a fixed 100U
+example. SDK `open_position` accepts `{method: pct_nav, pct_nav: fraction}`;
+native `risk_check` / `trade_intent_submit` use `size_pct_nav` instead (0.90 is
+90%). Carry the same requested fraction into risk checking and submission;
+do not also send a conflicting `size`. Explicit fixed sizing still uses USD.
+NAV is not free cash; account limits, reservations, other strategies and fees
+remain authoritative. Missing NAV is a blocker, not permission to guess 100U.
+Do not apply new-strategy defaults to a one-off order or existing position.
+For new defaults and low-utilization review, load
+`Skill(skill="strategy_author", file="references/position-sizing.md")`.
+
+## Risk-check honesty
+
+RUN `risk_check` on the size the operator actually asked for (for
+"all-in", that is the full available balance/NAV), never on a
+pre-shrunk size chosen to slip under a limit. If the requested size
+violates a limit, report the rejection (decision, limit, requested vs
+allowed notional) and stop; offer the compliant size as a *suggestion*
+for the operator to confirm, do not silently submit it.
+
+## Live trading boundary
+
+`runtime.live_trading_enabled` and the kill switch are protected
+scopes: you cannot turn live trading on, and `evolve_core_config_patch`
+will answer `advisory reject` if asked. When the operator asks to "go
+live" or to trade while live mode is off, state plainly that live
+trading is off / the request is rejected, that enabling it needs the
+operator's own dashboard action plus approval gates, and that you can
+run the same intent in paper mode instead.
+
+## Scripts
+
+- `scripts/risk_check.py`
+- `scripts/portfolio_summary.py`
+- `scripts/strategy_report.py`
+
+## Lazy References
+
+- `references/full-playbook.md` for detailed safety ordering.
+- `references/libraries.md` for trading library notes.

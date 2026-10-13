@@ -1,0 +1,47 @@
+version: 1
+id: default
+description: >
+  Default Nerya prompt bundle. Domain procedures live in Skills and references;
+  shared contracts are composed with role-specific prompts at load time.
+  Workspace seeding preserves operator edits and records composed-content hashes.
+profile: trading_paper
+agents:
+  system: system.md
+  policies: policies.md
+  main: main.agent.md
+subagent_common: shared/worker-contract.md
+subagents:
+  market_analyst: subagents/market_analyst.agent.md
+  technical_analyst: subagents/technical_analyst.agent.md
+  fundamentals_analyst: subagents/fundamentals_analyst.agent.md
+  sentiment_analyst: subagents/sentiment_analyst.agent.md
+  macro_strategist: subagents/macro_strategist.agent.md
+  quant_researcher: subagents/quant_researcher.agent.md
+  bull_researcher: subagents/bull_researcher.agent.md
+  bear_researcher: subagents/bear_researcher.agent.md
+  research_manager: subagents/research_manager.agent.md
+  research_editor: subagents/research_editor.agent.md
+  risk_critic: subagents/risk_critic.agent.md
+  execution_planner: subagents/execution_planner.agent.md
+  onchain_watcher: subagents/onchain_watcher.agent.md
+  news_interpreter: subagents/news_interpreter.agent.md
+  portfolio_manager: subagents/portfolio_manager.agent.md
+  portfolio_auditor: subagents/portfolio_auditor.agent.md
+  strategy_reviewer: subagents/strategy_reviewer.agent.md
+  message_writer: subagents/message_writer.agent.md
+  plan_lane: subagents/plan_lane.agent.md
+  explore_lane: subagents/explore_lane.agent.md
+  verification_lane: subagents/verification_lane.agent.md
+  web_researcher: subagents/web_researcher.agent.md
+  strategy_tuner: subagents/strategy_tuner.agent.md
+  coding_agent: subagents/coding_agent.agent.md
+  code_critic: subagents/code_critic.agent.md
+  buffett_lens: [subagents/buffett_lens.agent.md, shared/lens-contract.md]
+  damodaran_lens: [subagents/damodaran_lens.agent.md, shared/lens-contract.md]
+  marks_lens: [subagents/marks_lens.agent.md, shared/lens-contract.md]
+  mauboussin_lens: [subagents/mauboussin_lens.agent.md, shared/lens-contract.md]
+  druckenmiller_lens: [subagents/druckenmiller_lens.agent.md, shared/lens-contract.md]
+  serenity_lens: [subagents/serenity_lens.agent.md, shared/lens-contract.md]
+  unusual_whales_lens: [subagents/unusual_whales_lens.agent.md, shared/lens-contract.md]
+  kobeissi_lens: [subagents/kobeissi_lens.agent.md, shared/lens-contract.md]
+execution_policies: execution-policies.json

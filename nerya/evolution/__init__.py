@@ -1,0 +1,30 @@
+"""Nerya evolution subsystem.
+
+Produces proposals (learning updates, prompt patches, scripts, skills, triggers,
+strategy configs) that operators review and approve. Never auto-applies changes
+to protected scopes."""
+
+from .patch_proposal import Proposal, create_proposal, list_proposals, set_state
+from .promotion import apply_proposal
+from .ranking import (
+    EvidenceBundle, RankedProposal,
+    build_evidence, rank_proposals, rank_proposal,
+    write_ranking_snapshot,
+)
+from .rollback import rollback_proposal
+
+
+def evolve(*args, **kwargs):
+    from .runner import evolve as _evolve
+
+    return _evolve(*args, **kwargs)
+
+
+__all__ = [
+    "Proposal", "create_proposal", "list_proposals", "set_state",
+    "apply_proposal", "rollback_proposal",
+    "EvidenceBundle", "RankedProposal",
+    "build_evidence", "rank_proposals", "rank_proposal",
+    "write_ranking_snapshot",
+    "evolve",
+]

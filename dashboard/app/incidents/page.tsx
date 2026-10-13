@@ -1,0 +1,544 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslations } from "next-intl";
+import { clientApi } from "../../lib/clientApi";
+import type {
+  Incident,
+  KillSwitchView,
+  ReconciliationReport,
+} from "../../lib/clientApi";
+import {
+  Card,
+  Empty,
+  ErrorBanner,
+  Json,
+  Kpi,
+  LoadingState,
+  PageBody,
+  PageHeader,
+  Pill,
+} from "../../components/Page";
+import { SectionTabs } from "../../components/SectionTabs";
+import { FilterBar, Pagination, SearchField, TableViewport, useListPage } from "../../components/ListControls";
+import { ModalFrame } from "../../components/ModalFrame";
+import { ModePill } from "../../components/ModePill";
+import { formatTsShort } from "../../lib/format";
+import { confirm as confirmDialog, toast } from "../../lib/dialogs";
+
+function severityTone(
+  severity?: string,
+): "ok" | "warn" | "danger" | "neutral" | "brand" {
+  switch ((severity || "").toLowerCase()) {
+    case "info":
+      return "ok";
+    case "warning":
+      return "warn";
+    case "action_required":
+      return "danger";
+    case "trading_halted":
+      return "danger";
+    default:
+      return "neutral";
+  }
+}
+
+// Raw enum -> incidentsPage.* translation key. Unknown values (new
+// backend severities/kinds) fall back to the raw string.
+const SEVERITY_KEYS: Record<string, string> = {
+  info: "severityInfo",
+  warning: "severityWarning",
+  action_required: "severityActionRequired",
+  trading_halted: "severityTradingHalted",
+};
+
+const INCIDENT_KIND_KEYS: Record<string, string> = {
+  reconcile_drift: "kindReconcileDrift",
+  lost_order: "kindLostOrder",
+  "auth.error": "kindAuthError",
+  "max_loss.breach": "kindMaxLossBreach",
+  "snapshot.unhealthy": "kindSnapshotUnhealthy",
+};
+
+function enumLabel(
+  map: Record<string, string>,
+  value: string,
+  t: (key: string) => string,
+): string {
+  const key = map[value] ?? map[value.toLowerCase()];
+  return key ? t(key) : value;
+}
+
+function fmtTs(ts: unknown): string {
+  if (ts == null) return "–";
+  if (typeof ts === "string") return formatTsShort(ts);
+  const seconds = Number(ts);
+  if (!Number.isFinite(seconds)) return String(ts);
+  const ms = seconds > 1e12 ? seconds : seconds * 1000;
+  return formatTsShort(new Date(ms).toISOString());
+}
+
+const WINDOW_OPTIONS = [
+  { label: "15m", value: 900 },
+  { label: "1h", value: 3600 },
+  { label: "6h", value: 21600 },
+  { label: "24h", value: 86400 },
+];
+
+export default function IncidentsPage() {
+  const t = useTranslations("incidents");
+  const tCommon = useTranslations("common");
+  const tEnum = useTranslations("incidentsPage");
+  const [windowS, setWindowS] = useState<number>(3600);
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [reports, setReports] = useState<ReconciliationReport[]>([]);
+  const [worst, setWorst] = useState<ReconciliationReport | null>(null);
+  const [killSwitch, setKillSwitch] = useState<KillSwitchView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Incident | null>(null);
+  // Client-side kind filter ("all" = no filtering); chips are derived from
+  // the incidents actually present in the current time window.
+  const [kindFilter, setKindFilter] = useState<string>("all");
+  const [killUnknown, setKillUnknown] = useState(false);
+  // Guards against a toast on every 30s poll while the kill switch
+  // endpoint keeps failing — surface the failure once per failure streak.
+  const killToastShown = useRef(false);
+  const [query, setQuery] = useState("");
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const generation = useRef(0);
+  const windowRef = useRef(windowS);
+  windowRef.current = windowS;
+  const [reportsError, setReportsError] = useState<string | null>(null);
+
+  async function load() {
+    const request = ++generation.current;
+    setLoading(true);
+    setError(null);
+    try {
+      // The kill-switch promise carries its own error envelope so an early
+      // exit (e.g. controlIncidents rejecting) can never leave an orphaned
+      // rejection — previously `await killGet` sat after the first
+      // Promise.all and never ran when that rejected.
+      const killGet = clientApi
+        .controlKillSwitchGet()
+        .then((value) => ({ ok: true as const, value }))
+        .catch((e: unknown) => ({ ok: false as const, error: e }));
+      const [incidentsRes, reportsRes] = await Promise.all([
+        clientApi.controlIncidents(windowRef.current),
+        clientApi
+          .controlReconciliationReports({ limit: 25 })
+          .catch((reason: unknown) => ({ reports: null, worst_recent: null, loadError: reason })),
+      ]);
+      if (request !== generation.current) return;
+      setHasLoaded(true);
+      setIncidents(incidentsRes.incidents || []);
+      if (reportsRes.reports !== null) {
+        setReports(reportsRes.reports || []); setWorst(reportsRes.worst_recent ?? null); setReportsError(null);
+      } else setReportsError(t("reportsUnavailable"));
+      const killState = await killGet;
+      if (request !== generation.current) return;
+      if (killState.ok) {
+        setKillSwitch(killState.value);
+        setKillUnknown(false);
+        killToastShown.current = false;
+      } else {
+        // Never hide the kill switch controls silently: keep the last
+        // known state on screen and toast the failure (once per streak).
+        setKillUnknown(true);
+        if (!killToastShown.current) {
+          killToastShown.current = true;
+          toast({
+            tone: "error",
+            message:
+              killState.error instanceof Error
+                ? killState.error.message
+                : String(killState.error),
+          });
+        }
+      }
+    } catch (e) {
+      if (request === generation.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (request === generation.current) setLoading(false);
+    }
+  }
+
+  async function toggleKillSwitch() {
+    const next = killSwitch ? !killSwitch.kill_switch : true;
+    const ok = await confirmDialog({
+      message: next
+        ? t("killSwitchEngageConfirm")
+        : t("killSwitchReleaseConfirm"),
+      tone: next ? "danger" : "warning",
+    });
+    if (!ok) return;
+    setBusy("kill");
+    try {
+      const res = await clientApi.controlKillSwitchSet(next, "dashboard");
+      setKillSwitch((prev) =>
+        prev
+          ? { ...prev, kill_switch: !!res.kill_switch }
+          : { kill_switch: !!res.kill_switch, live_trading_enabled: false, ts: new Date().toISOString() },
+      );
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  useEffect(() => {
+    setIncidents([]); setHasLoaded(false); setSelected(null);
+    void load();
+    const t = setInterval(() => void load(), 30_000);
+    return () => { clearInterval(t); generation.current += 1; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [windowS]);
+
+  const incidentsByKind = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const i of incidents) {
+      map[i.kind] = (map[i.kind] || 0) + 1;
+    }
+    return map;
+  }, [incidents]);
+
+  const filteredIncidents = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return incidents.filter((incident) => (kindFilter === "all" || incident.kind === kindFilter) && (!needle ||
+      [incident.kind, incident.account_id, incident.subject, incident.order_id, incident.executor_id, incident.report_id]
+        .some((value) => String(value ?? "").toLocaleLowerCase().includes(needle))));
+  }, [incidents, kindFilter, query]);
+  const incidentPage = useListPage(filteredIncidents, windowS + ":" + kindFilter + ":" + query);
+  const reportPage = useListPage(reports, "reports", 10);
+
+  // Dispatch actions available per selected incident kind: recon-type
+  // events can trigger a reconciliation run, lost orders deep-link to the
+  // orders surface.
+  const selectedIsRecon =
+    selected != null &&
+    (selected.kind === "reconcile_drift" ||
+      selected.kind.startsWith("recon:"));
+  const selectedIsLostOrder = selected?.kind === "lost_order";
+
+  async function runReconcileNow() {
+    if (!selected) return;
+    setBusy("recon");
+    try {
+      const rawAccount = (selected as Record<string, unknown>).account_id;
+      const account_id =
+        typeof rawAccount === "string" && rawAccount ? rawAccount : undefined;
+      await clientApi.controlReconciliationRun({ account_id, operator: "dashboard" });
+      toast({ tone: "ok", message: tEnum("reconcileDone") });
+      setSelected(null);
+      await load();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const totalIssues = reports.reduce(
+    (sum, r) => sum + Number(r.summary?.issue_count ?? 0),
+    0,
+  );
+
+  return (
+    <div>
+      <PageHeader
+        title={t("title")}
+        description={t("description")}
+        actions={
+          <div className="flex items-center gap-2">
+            {killSwitch ? (
+              <>
+                <Pill tone={killSwitch.kill_switch ? "danger" : "ok"}>
+                  {killSwitch.kill_switch
+                    ? t("killSwitchEngaged")
+                    : t("killSwitchReleased")}
+                </Pill>
+                {!killSwitch.kill_switch ? (
+                  <ModePill
+                    mode={killSwitch.live_trading_enabled ? "live" : "paper"}
+                  />
+                ) : null}
+                <button
+                  onClick={toggleKillSwitch}
+                  disabled={busy === "kill"}
+                  className="btn-ghost text-xs text-danger"
+                  title={t("killSwitchToggleTitle")}
+                >
+                  {busy === "kill"
+                    ? "…"
+                    : killSwitch.kill_switch
+                      ? t("releaseKill")
+                      : t("engageKill")}
+                </button>
+              </>
+            ) : killUnknown ? (
+              <button
+                onClick={toggleKillSwitch}
+                disabled={busy === "kill"}
+                className="btn-ghost text-xs text-danger"
+                title={t("killSwitchToggleTitle")}
+              >
+                {busy === "kill" ? "…" : t("engageKill")}
+              </button>
+            ) : null}
+            <button
+              onClick={load}
+              disabled={loading}
+              className="btn-ghost text-xs"
+            >
+              {loading ? tCommon("refreshing") : tCommon("refresh")}
+            </button>
+          </div>
+        }
+      />
+      <SectionTabs section="trading" />
+      <PageBody>
+        {error && <ErrorBanner error={error} onRetry={() => void load()} />}
+        <ErrorBanner error={actionError} />
+        {killUnknown && <p role="status" className="text-sm text-warn">{t("killUnknown")}</p>}
+
+        {worst &&
+        (worst.severity === "action_required" ||
+          worst.severity === "trading_halted") ? (
+          <div
+            className={`rounded-lg border px-4 py-3 text-sm ${
+              worst.severity === "trading_halted"
+                ? "border-danger/50 bg-danger/10 text-danger"
+                : "border-warn/40 bg-warn/10 text-warn"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <Pill tone={severityTone(worst.severity)}>
+                {enumLabel(SEVERITY_KEYS, worst.severity, tEnum)}
+              </Pill>
+              <span className="font-mono text-[11px]">
+                {worst.scope}
+                {worst.account_id ? `:${worst.account_id}` : ""}
+              </span>
+              <span className="ml-auto text-[11px] text-ink-400">
+                {fmtTs(worst.ts)}
+              </span>
+            </div>
+            <div className="mt-1 text-xs">
+              {t("driftIssuesNeedAttention", { count: Number(worst.summary?.issue_count ?? 0) })}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <Kpi
+            label={t("kpiIncidents")}
+            value={hasLoaded ? String(incidents.length) : "–"}
+            tone={incidents.length > 0 ? "warn" : "neutral"}
+          />
+          <Kpi
+            label={t("kpiReconReports")}
+            value={`${reports.length}`}
+            delta={t("driftIssuesDelta", { count: totalIssues })}
+          />
+          <Kpi
+            label={t("kpiLostOrders")}
+            value={hasLoaded ? String(incidentsByKind["lost_order"] || 0) : "–"}
+            tone={(incidentsByKind["lost_order"] || 0) > 0 ? "danger" : "ok"}
+          />
+          <Kpi
+            label={t("kpiKillSwitch")}
+            value={killUnknown || !killSwitch ? t("statusUnknown") : killSwitch.kill_switch ? t("killSwitchEngaged") : t("killSwitchReleased")}
+            tone={killUnknown || !killSwitch ? "warn" : killSwitch.kill_switch ? "danger" : "ok"}
+          />
+        </div>
+
+        <div className="space-y-3 border-b border-[color:var(--line)] pb-4">
+          <FilterBar label={t("timeWindowTitle")} value={String(windowS)} onChange={(value) => setWindowS(Number(value))}
+            options={WINDOW_OPTIONS.map((option) => ({ value: String(option.value), label: t("lastWindow", { label: option.label }) }))} />
+          <FilterBar label={t("colKind")} value={kindFilter} onChange={setKindFilter}
+            options={[{ value: "all", label: tEnum("filterAll"), count: incidents.length }, ...Object.keys(incidentsByKind).sort().map((kind) => ({ value: kind, label: enumLabel(INCIDENT_KIND_KEYS, kind, tEnum), count: incidentsByKind[kind] }))]} />
+          <SearchField label={t("searchPlaceholder")} value={query} onChange={setQuery} />
+        </div>
+
+        <Card title={t("kpiIncidents")} description={t("incidentsDescription")}>
+          {loading && incidents.length === 0 ? (
+            <LoadingState />
+          ) : error && !hasLoaded ? null : filteredIncidents.length === 0 ? (
+            <Empty label={t("noIncidentsInWindow")} action={query || kindFilter !== "all" ? <button type="button" className="btn btn-ghost" onClick={() => { setQuery(""); setKindFilter("all"); }}>{t("clearFilters")}</button> : undefined} />
+          ) : (
+            <TableViewport label={t("kpiIncidents")}>
+              <table className="table w-full">
+                <thead>
+                  <tr className="text-[11px] text-ink-400">
+                    <th>{t("colSeverity")}</th>
+                    <th>{t("colKind")}</th>
+                    <th>{t("colAccount")}</th>
+                    <th>{t("colSubject")}</th>
+                    <th>{t("colWhen")}</th>
+                    <th><span className="sr-only">{t("inspect")}</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {incidentPage.rows.map((incident, idx) => (
+                    <tr
+                      key={`${incident.kind}-${idx}-${String(incident.ts)}`}
+                      className="text-xs"
+                    >
+                      <td>
+                        <Pill tone={severityTone(incident.severity)}>
+                          {enumLabel(
+                            SEVERITY_KEYS,
+                            String(incident.severity || "info"),
+                            tEnum,
+                          )}
+                        </Pill>
+                      </td>
+                      <td className="font-mono">
+                        {enumLabel(INCIDENT_KIND_KEYS, incident.kind, tEnum)}
+                      </td>
+                      <td className="font-mono text-ink-300">
+                        {String((incident as Record<string, unknown>).account_id ?? "–")}
+                      </td>
+                      <td className="font-mono text-ink-200 truncate max-w-[280px]">
+                        {String(
+                          (incident as Record<string, unknown>).subject ??
+                            (incident as Record<string, unknown>).order_id ??
+                            (incident as Record<string, unknown>).executor_id ??
+                            (incident as Record<string, unknown>).report_id ??
+                            "",
+                        )}
+                      </td>
+                      <td className="text-ink-400 font-mono">
+                        {fmtTs(incident.ts)}
+                      </td>
+                      <td>
+                        <button
+                          onClick={() => setSelected(incident)}
+                          className="btn btn-ghost text-xs"
+                        >
+                          {t("inspect")}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </TableViewport>
+          )}
+          <Pagination {...incidentPage} />
+        </Card>
+
+        <Card
+          title={t("kpiReconReports")}
+          description={t("reconciliationReportsDescription")}
+        >
+          <ErrorBanner error={reportsError} onRetry={() => void load()} />
+          {reportsError && !reports.length ? null : reports.length === 0 ? (
+            <Empty label={t("noReconciliationReports")} />
+          ) : (
+            <TableViewport label={t("kpiReconReports")}>
+              <table className="table w-full">
+                <thead>
+                  <tr className="text-[11px] text-ink-400">
+                    <th>{t("colSeverity")}</th>
+                    <th>{t("colScope")}</th>
+                    <th>{t("colAccount")}</th>
+                    <th>{t("colStrategy")}</th>
+                    <th>{t("colIssues")}</th>
+                    <th>{t("colWhen")}</th>
+                    <th><span className="sr-only">{t("inspect")}</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {reportPage.rows.map((r) => (
+                    <tr key={r.report_id} className="text-xs">
+                      <td>
+                        <Pill tone={severityTone(r.severity)}>
+                          {enumLabel(SEVERITY_KEYS, r.severity, tEnum)}
+                        </Pill>
+                      </td>
+                      <td className="font-mono">{r.scope}</td>
+                      <td className="font-mono text-ink-300">
+                        {r.account_id || "–"}
+                      </td>
+                      <td className="font-mono text-ink-300">
+                        {r.strategy_id || "–"}
+                      </td>
+                      <td>{Number(r.summary?.issue_count ?? 0)}</td>
+                      <td className="text-ink-400 font-mono">{fmtTs(r.ts)}</td>
+                      <td>
+                        <button
+                          onClick={() =>
+                            setSelected({
+                              ...r,
+                              kind: `recon:${r.scope}`,
+                              severity: r.severity,
+                              ts: r.ts,
+                            })
+                          }
+                          className="btn btn-ghost text-xs"
+                        >
+                          {t("inspect")}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </TableViewport>
+          )}
+          <Pagination {...reportPage} />
+        </Card>
+
+        {selected ? (
+          <ModalFrame title={t("incidentDetailTitle", { kind: enumLabel(INCIDENT_KIND_KEYS, selected.kind, tEnum) })} side="right" onClose={() => setSelected(null)} busy={busy !== null}>
+          <Card
+            title={t("incidentDetailTitle", {
+              kind: enumLabel(INCIDENT_KIND_KEYS, selected.kind, tEnum),
+            })}
+            actions={
+              <div className="flex items-center gap-2">
+                {/* Dispatch actions by kind: recon events can trigger a
+                    reconciliation run right here; lost orders jump to the
+                    orders surface (no ?id= deep link there yet). */}
+                {selectedIsRecon ? (
+                  <button
+                    onClick={() => void runReconcileNow()}
+                    disabled={busy === "recon"}
+                    className="btn-ghost text-xs"
+                  >
+                    {busy === "recon" ? "…" : tEnum("runReconcile")}
+                  </button>
+                ) : null}
+                {selectedIsLostOrder ? (
+                  <Link href="/orders" className="btn-ghost text-xs">
+                    {tEnum("viewOrders")}
+                  </Link>
+                ) : null}
+                <button
+                  onClick={() => setSelected(null)}
+                  className="btn-ghost text-xs"
+                >
+                  {tCommon("close")}
+                </button>
+              </div>
+            }
+          >
+            <dl className="mb-5 grid grid-cols-2 gap-4 text-sm">
+              <div><dt className="text-[color:var(--text-muted)]">{t("colSeverity")}</dt><dd className="mt-1"><Pill tone={severityTone(selected.severity)}>{enumLabel(SEVERITY_KEYS, String(selected.severity || "info"), tEnum)}</Pill></dd></div>
+              <div><dt className="text-[color:var(--text-muted)]">{t("colWhen")}</dt><dd className="mt-1">{fmtTs(selected.ts)}</dd></div>
+              <div className="col-span-2"><dt className="text-[color:var(--text-muted)]">{t("colAccount")}</dt><dd className="mt-1 break-words">{String(selected.account_id ?? "–")}</dd></div>
+            </dl>
+            <Json value={selected} />
+          </Card>
+          </ModalFrame>
+        ) : null}
+      </PageBody>
+    </div>
+  );
+}

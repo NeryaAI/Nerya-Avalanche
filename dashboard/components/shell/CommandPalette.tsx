@@ -1,0 +1,391 @@
+"use client";
+
+import { copy as i18nCopy } from "../../lib/i18n";
+
+/**
+ * ⌘K command palette — the Codex-style "搜索" surface.
+ *
+ * Provides a single overlay that blends navigation (jump to any
+ * destination), the strategy "projects" list, recent chat threads, and
+ * quick actions (start a new chat seeded with the query, run a web
+ * search). The provider owns the open state + the global ⌘K / Ctrl-K
+ * shortcut; the sidebar's Search row and any other surface call
+ * ``useCommandPalette().setOpen(true)``.
+ */
+
+import { useRouter } from "next/navigation";
+import * as Dialog from "@radix-ui/react-dialog";
+import { useTranslations,useLocale } from "next-intl";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentType,
+} from "react";
+import type { SVGProps } from "react";
+import { taskEntryTitle } from "../../lib/workbench";
+import { clientApi, callApi } from "../../lib/clientApi";
+import type { StrategyCard } from "../../lib/api";
+import { loadThreads, type ChatThread } from "../../lib/chat";
+import { setComposeDraft } from "../../lib/composeDraft";
+import {
+  AgentsIcon,
+  BellIcon,
+  ChatIcon,
+  ComposeIcon,
+  GlobeIcon,
+  MemoryIcon,
+  OverviewIcon,
+  PortfolioIcon,
+  SearchIcon,
+  SettingsIcon,
+  SkillsIcon,
+  StrategiesIcon,
+  TriggersIcon,
+} from "../icons";
+
+type IconComp = ComponentType<SVGProps<SVGSVGElement> & { size?: number }>;
+
+type PaletteContextValue = {
+  open: boolean;
+  setOpen: (value: boolean) => void;
+  toggle: () => void;
+};
+
+const PaletteContext = createContext<PaletteContextValue | null>(null);
+
+export function useCommandPalette(): PaletteContextValue {
+  const ctx = useContext(PaletteContext);
+  if (!ctx) {
+    return { open: false, setOpen: () => {}, toggle: () => {} };
+  }
+  return ctx;
+}
+
+export function CommandPaletteProvider({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const toggle = useCallback(() => setOpen((v) => !v), []);
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.isComposing || document.querySelector('[role="dialog"]:not([data-command-palette])')) return;
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setOpen((v) => !v);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const value = useMemo(() => ({ open, setOpen, toggle }), [open, toggle]);
+
+  return (
+    <PaletteContext.Provider value={value}>
+      {children}
+      <CommandPalette />
+    </PaletteContext.Provider>
+  );
+}
+
+type PaletteItem = {
+  id: string;
+  label: string;
+  sub?: string;
+  hint?: string;
+  group: string;
+  icon: IconComp;
+  keywords?: string;
+  onSelect: () => void;
+};
+
+function CommandPalette() {
+  const { open, setOpen } = useCommandPalette();
+  const zh=useLocale().startsWith("zh");
+  const router = useRouter();
+  const t = useTranslations("commandPalette");
+  const tUi = useTranslations("ui");
+  const tNav = useTranslations("sidebar");
+  const [query, setQuery] = useState("");
+  const [strategies, setStrategies] = useState<StrategyCard[]>([]);
+  const [threads, setThreads] = useState<ChatThread[]>([]);
+  const [serverTasks,setServerTasks]=useState<Array<{session_id:string;title:string;match?:{message_id:string;snippet:string}}>>([]);
+  const [searching,setSearching]=useState(false);
+  const [activeIdx, setActiveIdx] = useState(0);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const listId = useId();
+
+  // Reset transient state + focus the field every time the palette opens.
+  useEffect(() => {
+    if (!open) return;
+    setQuery("");
+    setActiveIdx(0);
+    setThreads(loadThreads().slice(0, 8));
+    let cancelled = false;
+    clientApi
+      .strategyList()
+      .then((res) => {
+        if (!cancelled) setStrategies(res.strategies ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setStrategies([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  useEffect(()=>{
+    if(!open)return;
+    let cancelled=false;const controller=new AbortController();
+    setSearching(true);setServerTasks([]);
+    const timer=setTimeout(()=>{
+      const params=new URLSearchParams({view:"workbench",q:query.trim(),limit:"12"});
+      void callApi<{sessions:Array<{session_id:string;title:string;meta?:unknown;match?:{message_id:string;snippet:string}}> }>("/agent/sessions?"+params,{signal:controller.signal}).then(result=>{
+        if(!cancelled)setServerTasks((result.sessions||[]).map(row=>({...row,title:taskEntryTitle(row)})));
+      }).catch(()=>{if(!cancelled)setServerTasks([]);}).finally(()=>{if(!cancelled)setSearching(false);});
+    },query.trim()?180:0);
+    return()=>{cancelled=true;controller.abort();clearTimeout(timer);};
+  },[open,query]);
+
+  const go = useCallback(
+    (href: string) => {
+      setOpen(false);
+      router.push(href);
+    },
+    [router, setOpen],
+  );
+
+  const destinations = useMemo<PaletteItem[]>(() => {
+    const rows: { href: string; label: string; icon: IconComp; keywords?: string }[] = [
+      { href: "/", label: tNav("home"), icon: OverviewIcon, keywords: "home start build compose" },
+      { href: "/chat", label: tNav("newChat"), icon: ComposeIcon, keywords: "chat agent ask" },
+      { href: "/dashboard", label: tNav("overview"), icon: OverviewIcon, keywords: "dashboard home" },
+      { href: "/portfolio", label: tNav("trading"), icon: PortfolioIcon, keywords: "trading portfolio positions orders accounts" },
+      { href: "/strategies", label: tNav("strategies"), icon: StrategiesIcon, keywords: "strategy lab backtest" },
+      { href: "/skills", label: tNav("skills"), icon: SkillsIcon, keywords: "skills plugins capabilities tools" },
+      { href: "/workflows", label: tNav("automation"), icon: TriggersIcon, keywords: "automation workflow trigger schedule" },
+      { href: "/inbox", label: tNav("inbox"), icon: BellIcon, keywords: "inbox approvals notifications" },
+      { href: "/agents", label: tNav("agents"), icon: AgentsIcon, keywords: "agents subagents runtime" },
+      { href: "/self-evolution?tab=memory", label: tNav("memory"), icon: MemoryIcon, keywords: "memory profile facts" },
+      { href: "/web-search", label: tNav("webSearch"), icon: GlobeIcon, keywords: "web search browse" },
+      { href: "/settings", label: tNav("settings"), icon: SettingsIcon, keywords: "settings preferences" },
+    ];
+    return rows.map((row) => ({
+      id: `dest:${row.href}`,
+      label: row.label,
+      group: t("jumpTo"),
+      icon: row.icon,
+      keywords: row.keywords,
+      onSelect: () => go(row.href),
+    }));
+  }, [go, t, tNav]);
+
+  const strategyItems = useMemo<PaletteItem[]>(
+    () =>
+      strategies.slice(0, 12).map((s) => ({
+        id: `strategy:${s.id}`,
+        label: s.title || s.id,
+        sub: s.status,
+        group: t("projects"),
+        icon: StrategiesIcon,
+        keywords: `${s.id} ${s.markets?.join(" ") ?? ""}`,
+        onSelect: () => go(`/strategies/${encodeURIComponent(s.id)}`),
+      })),
+    [strategies, go, t],
+  );
+
+  const recentItems = useMemo<PaletteItem[]>(()=>{
+    if(serverTasks.length)return serverTasks.map(task=>({id:"thread:"+task.session_id,label:task.title||t("untitledChat"),sub:task.match?.snippet,group:t("recent"),icon:ChatIcon,
+      onSelect:()=>go("/chat/"+encodeURIComponent(task.session_id)+(task.match?"?message="+encodeURIComponent(task.match.message_id):""))}));
+    return threads.slice(0,8).map(th=>({id:"thread:"+th.id,label:th.title||t("untitledChat"),group:t("recent"),icon:ChatIcon,onSelect:()=>go("/chat/"+encodeURIComponent(th.id))}));
+  },[serverTasks,threads,t,go]);
+
+  const actionItems = useMemo<PaletteItem[]>(() => {
+    const trimmed = query.trim();
+    if (!trimmed) return [];
+    return [
+      {
+        id: "action:ask",
+        label: t("askNerya", { query: trimmed }),
+        group: t("actions"),
+        icon: ComposeIcon,
+        onSelect: () => {
+          setComposeDraft(trimmed);
+          go("/chat");
+        },
+      },
+      {
+        id: "action:web",
+        label: t("searchWeb", { query: trimmed }),
+        group: t("actions"),
+        icon: GlobeIcon,
+        onSelect: () => go(`/web-search?q=${encodeURIComponent(trimmed)}`),
+      },
+    ];
+  }, [query, t, go]);
+
+  const filtered = useMemo<PaletteItem[]>(() => {
+    const q = query.trim().toLowerCase();
+    const pool = [...destinations, ...strategyItems, ...recentItems];
+    const matched = q
+      ? pool.filter((item) =>
+          (item.id.startsWith("thread:") && serverTasks.some(task=>"thread:"+task.session_id===item.id)) || `${item.label} ${item.sub ?? ""} ${item.keywords ?? ""}`
+            .toLowerCase()
+            .includes(q),
+        )
+      : [...recentItems, ...destinations, ...strategyItems];
+    return [...matched, ...actionItems];
+  }, [query, destinations, strategyItems, recentItems, actionItems,serverTasks]);
+
+  useEffect(() => {
+    setActiveIdx(0);
+  }, [query]);
+
+  const grouped = useMemo(() => {
+    const order: string[] = [];
+    const map = new Map<string, PaletteItem[]>();
+    for (const item of filtered) {
+      if (!map.has(item.group)) {
+        map.set(item.group, []);
+        order.push(item.group);
+      }
+      map.get(item.group)!.push(item);
+    }
+    return order.map((group) => ({ group, items: map.get(group)! }));
+  }, [filtered]);
+
+  useEffect(() => {
+    setActiveIdx((index) => Math.max(0, Math.min(index, filtered.length - 1)));
+  }, [filtered.length]);
+
+  useEffect(() => {
+    if (open) listRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [activeIdx, open, filtered.length]);
+
+  if (!open) return null;
+
+  function onKeyDown(event: React.KeyboardEvent) {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveIdx((i) => Math.max(0, Math.min(i + 1, filtered.length - 1)));
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveIdx((i) => Math.max(i - 1, 0));
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      grouped.flatMap(group=>group.items)[activeIdx]?.onSelect();
+    }
+  }
+
+  let runningIndex = -1;
+
+  return (
+    <Dialog.Root open={open} onOpenChange={setOpen}>
+      <Dialog.Portal>
+      <Dialog.Overlay className="ui-modal-overlay" />
+      <Dialog.Content
+        data-command-palette=""
+        className="ui-dialog ui-command-palette"
+        aria-describedby={undefined}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          inputRef.current?.focus();
+        }}
+        onCloseAutoFocus={(event) => { event.preventDefault(); if (returnFocus.current?.isConnected) returnFocus.current.focus(); }}
+      >
+        <Dialog.Title className="sr-only">{t("placeholder")}</Dialog.Title>
+        <div className="flex items-center gap-2.5 border-b px-4 py-3" style={{ borderColor: "var(--line)" }}>
+          <SearchIcon size={18} className="shrink-0 text-[color:var(--text-muted)]" />
+          <input
+            ref={inputRef}
+            role="combobox"
+            aria-label={t("placeholder")}
+            aria-autocomplete="list"
+            aria-expanded={open}
+            aria-controls={listId}
+            aria-activedescendant={filtered[activeIdx] ? `${listId}-${activeIdx}` : undefined}
+            onKeyDown={onKeyDown}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t("placeholder")}
+            className="w-full bg-transparent text-[15px] text-[color:var(--text-base)] placeholder:text-[color:var(--text-muted)] focus:outline-none"
+          />
+          <Dialog.Close className="ui-icon-button text-xs" aria-label={tUi("close")}>ESC</Dialog.Close>
+        </div>
+
+        {searching&&query&&<div className="px-4 pt-2 text-xs text-[color:var(--text-muted)]" role="status">{i18nCopy(zh, "copy.components_shell_CommandPalette.001")}</div>}
+        <div ref={listRef} id={listId} role="listbox" aria-label={t("jumpTo")} className="embedded-scroll max-h-[60dvh] py-2">
+          {filtered.length === 0 ? (
+            <div className="px-4 py-10 text-center text-[13px] text-[color:var(--text-muted)]">
+              {t("noResults")}
+            </div>
+          ) : (
+            grouped.map(({ group, items }) => (
+              <div key={group} className="mb-1.5">
+                <div className="px-4 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-[color:var(--text-muted)]">
+                  {group}
+                </div>
+                {items.map((item) => {
+                  runningIndex += 1;
+                  const index = runningIndex;
+                  const active = index === activeIdx;
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      id={`${listId}-${index}`}
+                      role="option"
+                      aria-selected={active}
+                      tabIndex={-1}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onMouseEnter={() => setActiveIdx(index)}
+                      onClick={() => item.onSelect()}
+                      className={`flex w-full items-center gap-3 px-4 py-2 text-left text-[13px] transition-colors ${
+                        active
+                          ? "bg-brand-500/15 text-[color:var(--text-base)]"
+                          : "text-[color:var(--text-muted)] hover:bg-brand-500/8"
+                      }`}
+                    >
+                      <Icon size={16} className="shrink-0 opacity-80" />
+                      <span className="flex-1 truncate">{item.label}</span>
+                      {item.sub ? (
+                        <span className="max-w-[40%] truncate text-[11px] text-[color:var(--text-muted)]">
+                          {item.sub}
+                        </span>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
+            ))
+          )}
+        </div>
+      </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}

@@ -1,0 +1,278 @@
+"use client";
+
+import { useTranslations } from "next-intl";
+import { ReactNode, useState } from "react";
+import type { NativeBlock } from "../../../lib/chat";
+import { CopyButton, Tag, ToolRowCard } from "./atoms";
+import { arrayOfRecords, recordOf } from "./helpers";
+import { Icon as NeryaGlyph, type IconName } from "../../icons";
+
+function fileIconFor(action: string): ReactNode {
+  const names: Record<string, IconName> = {
+    edit_file: 'scripts', write_file: 'save', list_dir: 'folder', glob: 'folder', grep: 'search',
+  };
+  return <NeryaGlyph name={names[action] || 'document'} size={16} />;
+}
+
+const FILE_LABELS: Record<string, string> = {
+  read_file: "Read file",
+  edit_file: "Edit file",
+  write_file: "Write file",
+  list_dir: "List directory",
+  glob: "Glob search",
+  grep: "Grep",
+};
+
+function fileLabelFor(action: string): string {
+  return FILE_LABELS[action] || action;
+}
+
+function pickPath(block: NativeBlock): string {
+  const payload = recordOf(block.payload);
+  const result = recordOf(block.result);
+  return String(
+    payload.path ||
+      payload.file ||
+      payload.pattern ||
+      payload.dir ||
+      result.path ||
+      result.file ||
+      "",
+  );
+}
+
+function pickDiffOrText(block: NativeBlock): {
+  kind: "diff" | "text" | "";
+  body: string;
+} {
+  const result = recordOf(block.result);
+  const content = result.content;
+  if (Array.isArray(content)) {
+    for (const part of content) {
+      const r = recordOf(part);
+      const partKind = String(r.type || r.kind || "");
+      if (partKind === "diff" && typeof r.text === "string") {
+        return { kind: "diff", body: r.text };
+      }
+    }
+    for (const part of content) {
+      const r = recordOf(part);
+      if (typeof r.text === "string" && r.text.trim()) {
+        return { kind: "text", body: r.text };
+      }
+    }
+  }
+  if (typeof result.diff === "string") return { kind: "diff", body: result.diff };
+  if (typeof result.text === "string") return { kind: "text", body: result.text };
+  return { kind: "", body: "" };
+}
+
+function DiffPanel({ diff }: { diff: string }) {
+  const lines = diff.split("\n");
+  return (
+    <div className="rounded-xl border border-brand-500/15 bg-ink-900/40 overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-brand-500/10">
+        <span className="text-[11px] text-ink-500 font-medium">
+          unified diff
+        </span>
+        <CopyButton text={diff} />
+      </div>
+      <pre className="px-3 py-2 text-[11px] font-mono leading-relaxed overflow-auto max-h-72">
+        {lines.map((line, i) => {
+          let cls = "text-ink-300";
+          if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")) {
+            cls = "text-brand-300";
+          } else if (line.startsWith("+")) {
+            cls = "text-emerald-300 bg-emerald-400/[0.04]";
+          } else if (line.startsWith("-")) {
+            cls = "text-rose-300 bg-rose-400/[0.04]";
+          }
+          return (
+            <div key={i} className={`${cls} px-1`}>
+              {line || "\u00A0"}
+            </div>
+          );
+        })}
+      </pre>
+    </div>
+  );
+}
+
+export function FileOpCard({
+  block,
+  variant,
+  pending = false,
+  defaultOpen = false,
+}: {
+  block: NativeBlock;
+  variant: "use" | "result";
+  pending?: boolean;
+  defaultOpen?: boolean;
+}) {
+  const t = useTranslations("fileOpCard");
+  const [expanded, setExpanded] = useState(false);
+  const action = String(block.action || "").toLowerCase();
+  const label = fileLabelFor(action);
+  const path = pickPath(block);
+  const ok = block.ok !== false && !block.error;
+  const isResult = variant === "result";
+  const result = recordOf(block.result);
+  const payload = recordOf(block.payload);
+
+  const { kind: bodyKind, body } = isResult
+    ? pickDiffOrText(block)
+    : { kind: "" as const, body: "" };
+  const offset = typeof result.offset === 'number' ? result.offset : typeof payload.offset === 'number' ? payload.offset : null;
+  const limit = typeof result.limit === 'number' ? result.limit : typeof payload.limit === 'number' ? payload.limit : null;
+  const lineRange = offset !== null && offset >= 0
+    ? `lines ${offset + 1}${limit !== null && limit > 0 ? `–${offset + limit}` : '+'}${typeof result.total_lines === 'number' ? ` / ${result.total_lines}` : ''}`
+    : typeof payload.line_offset === 'number' ? `lines ${payload.line_offset}` : '';
+  const matches = arrayOfRecords(result.matches);
+  const entries = arrayOfRecords(result.entries);
+  const truncated = result.truncated === true;
+  const previewBytes =
+    typeof result.bytes === "number"
+      ? `${result.bytes} bytes`
+      : typeof result.size === "number"
+      ? `${result.size} bytes`
+      : "";
+
+  const lines = body ? body.split("\n") : [];
+  const previewLineCount = action === "read_file" ? 12 : 6;
+  const preview = lines.slice(0, previewLineCount).join("\n");
+  const hasMore = lines.length > previewLineCount;
+
+  return (
+    <ToolRowCard
+      icon={fileIconFor(action)}
+      title={
+        <span className="inline-flex min-w-0 items-center gap-1.5">
+          <span>{isResult ? label : label}</span>
+          {pending ? (
+            <span className="inline-flex items-center gap-1 text-[10px] text-fluid-400">
+              <span className="typing-dot" />
+              <span>{t("running")}</span>
+            </span>
+          ) : null}
+        </span>
+      }
+      subtitle={
+        <span className="font-mono">
+          {path || (action === "grep" ? String(payload.pattern || "") : "\u2014")}
+        </span>
+      }
+      tone={ok ? "neutral" : "err"}
+      defaultOpen={defaultOpen || pending}
+      meta={
+        <>
+          {isResult ? (
+            ok ? (
+              <Tag tone="ok">
+                {action === "edit_file" || action === "write_file" ? t("applied") : t("ok")}
+              </Tag>
+            ) : (
+              <Tag tone="err">{(block.error_kind as string | undefined) || "error"}</Tag>
+            )
+          ) : null}
+          {previewBytes ? <Tag>{previewBytes}</Tag> : null}
+          {truncated ? <Tag tone="warn">{t("truncated")}</Tag> : null}
+          {typeof block.elapsed_ms === "number" ? <Tag>{block.elapsed_ms}ms</Tag> : null}
+        </>
+      }
+    >
+
+      {lineRange ? (
+        <div className="text-[11px] text-ink-400 font-mono">{lineRange}</div>
+      ) : null}
+
+      {action === "grep" && payload.pattern ? (
+        <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 px-3 py-1.5">
+          <div className="text-[11px] text-ink-500 font-medium mb-0.5">
+            {t("pattern")}
+          </div>
+          <div className="text-[12px] text-ink-100 font-mono break-words">
+            {String(payload.pattern || "")}
+          </div>
+        </div>
+      ) : null}
+
+      {isResult && block.error ? (
+        <div className="text-[12px] text-rose-300 break-words">{String(block.error)}</div>
+      ) : null}
+
+      {isResult && bodyKind === "diff" && body ? <DiffPanel diff={body} /> : null}
+
+      {isResult && bodyKind === "text" && body && action === "read_file" ? (
+        <div className="rounded-xl border border-brand-500/15 bg-ink-900/40 overflow-hidden">
+          <div className="flex items-center justify-between px-3 py-1.5 border-b border-brand-500/10">
+            <span className="text-[11px] text-ink-500 font-medium">
+              {t("fileContents")}
+            </span>
+            <CopyButton text={body} />
+          </div>
+          <pre
+            className={`px-3 py-2 text-[11px] font-mono leading-relaxed text-ink-200 whitespace-pre overflow-auto ${
+              expanded ? "max-h-[640px]" : "max-h-48"
+            }`}
+          >
+            {expanded ? body : preview}
+          </pre>
+          {hasMore ? (
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              className="w-full text-[12px] text-brand-300 hover:text-brand-200 cursor-pointer transition-colors py-1.5 border-t border-brand-500/10"
+            >
+              {expanded ? t("collapse") : t("showAllLines", { count: lines.length })}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {isResult && (action === "list_dir" || action === "glob") && entries.length ? (
+        <div className="rounded-xl border border-brand-500/15 bg-ink-900/40 px-3 py-2 max-h-56 overflow-auto">
+          <div className="text-[11px] text-ink-500 font-medium mb-1.5">
+            {t("entriesCount", { count: entries.length })}
+          </div>
+          <ul className="space-y-0.5 font-mono text-[11px] text-ink-200">
+            {entries.slice(0, 200).map((entry, i) => {
+              const name = String(entry.name || entry.path || "");
+              const isDir = entry.is_dir === true || String(entry.kind || "") === "dir";
+              const size = typeof entry.size === "number" ? `  ${entry.size}b` : "";
+              return (
+                <li key={i} className="flex items-center gap-2">
+                  <span className={isDir ? "text-brand-300" : "text-ink-400"}>
+                    {isDir ? "\u25B8" : "\u00B7"}
+                  </span>
+                  <span className={isDir ? "text-brand-200" : ""}>{name}</span>
+                  <span className="ml-auto text-ink-500">{size}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : null}
+
+      {isResult && action === "grep" && matches.length ? (
+        <div className="rounded-xl border border-brand-500/15 bg-ink-900/40 px-3 py-2 max-h-72 overflow-auto">
+          <div className="text-[11px] text-ink-500 font-medium mb-1.5">
+            {t("matchesCount", { count: matches.length })}
+          </div>
+          <ul className="space-y-1 font-mono text-[11px]">
+            {matches.slice(0, 100).map((m, i) => (
+              <li key={i} className="flex flex-wrap items-baseline gap-2">
+                <span className="text-brand-300">{String(m.path || "")}</span>
+                <span className="text-ink-500">
+                  :{String(m.line || m.line_number || "?")}
+                </span>
+                <span className="text-ink-200 break-all">
+                  {String(m.text || m.match || "")}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </ToolRowCard>
+  );
+}

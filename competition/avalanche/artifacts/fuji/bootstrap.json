@@ -1,0 +1,37 @@
+{
+  "chainId": 43113,
+  "network": "Avalanche Fuji",
+  "testnetOnly": true,
+  "owner": "0x0114407BE7786bAD13aeF5Ec877f1E1319B1730C",
+  "agent": "0x91bf74bfA3495149382b2e9b972926eED73B9284",
+  "before": {
+    "ownerAvax": "0.2999999999820696",
+    "agentAvax": "0.05",
+    "ownerLfjUsdc": "0.0"
+  },
+  "after": {
+    "ownerAvax": "0.29999999995008176",
+    "agentAvax": "0.05",
+    "ownerLfjUsdc": "1.750786"
+  },
+  "router": "0x18556DA13313f3532c54711497A8FedAC273220E",
+  "lfjTestUsdc": "0xB6076C93701D6a07266c31066B298AeC6dd65c2d",
+  "transactions": [
+    {
+      "name": "approve_router",
+      "hash": "0xd4e638c9b33416f8b8c8c9fcce51b1d2740d30d600dde80c7e3afeb9acbf87d8",
+      "blockNumber": 59107076
+    },
+    {
+      "name": "lfj_wavax_to_test_usdc",
+      "hash": "0x61b17d8eb7e772e5b645f7972935b4a052e6cff14161bc35cb554b3f6e33495e",
+      "blockNumber": 59107081,
+      "pair": "0x88F36a6B0e37E78d0Fb1d41B07A47BAD3D995453",
+      "binStep": "20",
+      "version": "1",
+      "quotedUsdc": "1.750786",
+      "minUsdc": "1.733278"
+    }
+  ],
+  "completedAt": "2026-10-06T15:28:07.461Z"
+}

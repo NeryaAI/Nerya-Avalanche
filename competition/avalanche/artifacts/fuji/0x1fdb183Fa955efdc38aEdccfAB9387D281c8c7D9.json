@@ -1,0 +1,72 @@
+{
+  "chainId": 43113,
+  "network": "Avalanche Fuji",
+  "owner": "0x0114407BE7786bAD13aeF5Ec877f1E1319B1730C",
+  "agent": "0x91bf74bfA3495149382b2e9b972926eED73B9284",
+  "vault": "0x1fdb183Fa955efdc38aEdccfAB9387D281c8c7D9",
+  "deploymentHash": "0x417f5ad332d38c2a58d5b361ab8d0c0a454ed1f84277b73cfa80da66bd1cf350",
+  "router": "0x18556DA13313f3532c54711497A8FedAC273220E",
+  "transactions": [
+    {
+      "name": "approve",
+      "hash": "0xe653453e674d36061e5b48de498cffa835ef6c671aabc0bc03b3753570aa3bea",
+      "blockNumber": 59107149
+    },
+    {
+      "name": "deposit",
+      "hash": "0xef8ee5bbb24bfe6af9d90b2b6d78be79f3b6c7df9052aa29ba8a233ab2bcb57e",
+      "blockNumber": 59107155
+    },
+    {
+      "name": "activate_policy",
+      "hash": "0x588595e13a5b43d18650a837051bcf56074c07cbb5ed4986726055b59cc027c2",
+      "blockNumber": 59107274
+    },
+    {
+      "name": "swap",
+      "hash": "0xaa0d09a5f1a237d8b2e9fb45cddba2a65a0887942a2f397565103ba2eb9ad1cc",
+      "blockNumber": 59107280
+    }
+  ],
+  "status": "confirmed",
+  "evidenceHash": "0x6410b84af5dbd2eabb1e630c4d08c7e778fdfc90141cfce721971015249fe847",
+  "executionEvidence": {
+    "transactionHash": "0xaa0d09a5f1a237d8b2e9fb45cddba2a65a0887942a2f397565103ba2eb9ad1cc",
+    "blockNumber": 59107280,
+    "intentHash": "0xc1ed96a9c067a23d604485faeb7b897e613ff255a0146af1d5d247515d635709",
+    "evidenceHash": "0x6410b84af5dbd2eabb1e630c4d08c7e778fdfc90141cfce721971015249fe847",
+    "amountIn": "1.0",
+    "amountOut": "0.091606094251262347",
+    "routePair": "0x0B16Fd47Cbf5350eBDe20aA813Db8E58846cd5D2",
+    "binStep": 20,
+    "version": 2,
+    "routerAllowance": "0",
+    "explorerUrl": "https://testnet.snowtrace.io/tx/0xaa0d09a5f1a237d8b2e9fb45cddba2a65a0887942a2f397565103ba2eb9ad1cc"
+  },
+  "publicBroadcastPerformed": true,
+  "policy": {
+    "domain": {
+      "name": "NeryaPolicyVault",
+      "version": "1",
+      "chainId": 43113,
+      "verifyingContract": "0x1fdb183Fa955efdc38aEdccfAB9387D281c8c7D9"
+    },
+    "policy": {
+      "agent": "0x91bf74bfA3495149382b2e9b972926eED73B9284",
+      "tokenIn": "0xB6076C93701D6a07266c31066B298AeC6dd65c2d",
+      "tokenOut": "0xd00ae08403B9bbb9124bB305C09058E32C39A48c",
+      "strategyHash": "0xeadc5751394f29cd36d22b59c20c17ccec648fb682a10707ea263daef5d77189",
+      "maxSingle": "10000000",
+      "maxDaily": "30000000",
+      "maxTotal": "50000000",
+      "minRateWad": "89315941894980788325000000000",
+      "expiry": "1791302213",
+      "nonce": "0",
+      "binStep": 20,
+      "version": 2
+    },
+    "signature": "0x689759d912a8c4070fad8c8267d17f4024d4f3714c473a7045161a5a646616b141708795180b1ec847a31ad4de3dd1adf7b65fb526673045102fb8f80cbbe5bd1b",
+    "policyHash": "0xb097e10cf7e2002e648cb9dc572f0c2e7290bf880a895a1353e706ba368d91dd",
+    "routePair": "0x0B16Fd47Cbf5350eBDe20aA813Db8E58846cd5D2"
+  }
+}

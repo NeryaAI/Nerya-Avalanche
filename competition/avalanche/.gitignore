@@ -1,0 +1,7 @@
+node_modules/
+build/
+.runtime/
+artifacts/private/
+artifacts/fuji/setup/
+artifacts/fuji/testnet-wallet-addresses.json
+*.log

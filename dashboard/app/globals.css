@@ -1,0 +1,1082 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Nerya Outline: one neutral silhouette in both themes. Colour and interaction
+   belong to the control; SVGs never become a separate pointer/focus target. */
+.nerya-icon {
+  display: inline-block;
+  flex-shrink: 0;
+  vertical-align: -0.125em;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .nerya-icon { animation: none !important; transition: none !important; }
+}
+
+/* The console uses local system fonts: readable CJK fallbacks and no
+   remote font requests in a private, sometimes offline workspace. */
+
+/* ── 暗色模式（默认）──────────────────────────────────────────── */
+:root {
+  color-scheme: dark;
+
+  /* Ink palette — RGB triples so Tailwind ``<alpha-value>`` opacity
+     modifiers (``bg-ink-800/70`` etc.) can compose against them.
+     The ``rgb(...)`` is constructed in ``tailwind.config.ts``. */
+  --ink-50:  245 246 250;
+  --ink-100: 233 235 242;
+  --ink-200: 203 208 221;
+  --ink-300: 174 181 199;
+  --ink-400: 155 163 183;
+  --ink-500: 139 148 168;
+  --ink-600: 57 63 80;
+  --ink-700: 39 44 58;
+  --ink-800: 27 30 40;
+  --ink-900: 21 24 32;
+  --ink-950: 16 18 25;
+  --brand-readable: 199 178 251;
+  --tone-ok: 85 207 153;
+  --tone-warn: 235 183 83;
+  --tone-danger: 249 124 141;
+
+  --overlay-surface: #1b1e28;
+  --grid: transparent;
+  --bg-deep: #101219;
+  --bg: #151820;
+  --card: #1b1e28;
+  --card-hi: #242836;
+  --line: rgb(179 190 218 / 14%);
+  --line-hi: rgb(179 190 218 / 30%);
+  --ok: rgb(var(--tone-ok));
+  --warn: rgb(var(--tone-warn));
+  --err: rgb(var(--tone-danger));
+  --violet: #8b5cf6;
+  --violet-2: #b48bff;
+  --fluid: #22d3ee;
+  --fluid-soft: rgba(34, 211, 238, 0.16);
+  --text-base: #e9ebf2;
+  --text-muted: #a3acc0;
+  --syntax-comment: var(--text-muted);
+  --syntax-keyword: rgb(var(--brand-readable));
+  --syntax-type: #7dd3fc;
+  --syntax-function: #93c5fd;
+  --syntax-string: var(--ok);
+  --syntax-number: var(--warn);
+  --syntax-meta: #f0abfc;
+  --syntax-deletion: var(--err);
+  --scrollbar-track: #151820;
+  --scrollbar-thumb: #394050;
+  --scrollbar-thumb-hover: #555f75;
+  --table-sticky-bg: #1b1e28;
+  --header-bg: #101219;
+  --panel-bg: #151820;
+}
+
+/* ── 亮色模式（html.light 时覆盖）──────────────────────────────── */
+html.light {
+  color-scheme: light;
+
+  /* Ink palette — light mode (RGB triples, see :root above) */
+  --ink-50:  21 27 40;
+  --ink-100: 28 35 51;
+  --ink-200: 49 58 77;
+  --ink-300: 73 82 103;
+  --ink-400: 87 97 118;
+  --ink-500: 102 112 131;
+  --ink-600: 193 201 215;
+  --ink-700: 215 221 231;
+  --ink-800: 232 236 243;
+  --ink-900: 242 244 248;
+  --ink-950: 248 249 252;
+  --brand-readable: 109 40 217;
+  --tone-ok: 19 115 71;
+  --tone-warn: 139 88 15;
+  --tone-danger: 190 49 70;
+
+  --overlay-surface: #fdfdff;
+  --bg-deep: #f8f9fc;
+  --bg: #f2f4f8;
+  --card: #fdfdff;
+  --card-hi: #eef1f7;
+  --line: rgb(38 52 78 / 13%);
+  --line-hi: rgb(38 52 78 / 28%);
+  --violet: #7c3aed;
+  --violet-2: #8b5cf6;
+  --fluid: #0891b2;
+  --fluid-soft: rgba(8, 145, 178, 0.12);
+  --text-base: #1c2333;
+  --text-muted: #59657b;
+  --syntax-type: #075985;
+  --syntax-function: #1d4ed8;
+  --syntax-meta: #86198f;
+  --scrollbar-track: #f2f4f8;
+  --scrollbar-thumb: #c1c9d7;
+  --scrollbar-thumb-hover: #9ba6ba;
+  --table-sticky-bg: #fdfdff;
+  --header-bg: #f8f9fc;
+  --panel-bg: #eef1f7;
+}
+
+html, body {
+  background-color: var(--bg-deep);
+  color: var(--text-base);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", sans-serif;
+  font-feature-settings: "cv03", "cv04", "cv09", "ss01";
+  letter-spacing: 0;
+  overflow-x: clip;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+@supports not (overflow: clip) {
+  html, body { overflow-x: hidden; }
+}
+
+body {
+  background-color: var(--bg-deep);
+  min-height: 100vh;
+}
+
+html.light body {
+  background-image: none;
+  background-color: var(--bg-deep);
+}
+
+/* Aurora background — disabled in the airy redesign (2026-05).
+   The animated mesh competed with content and added visual noise. */
+body::before,
+body::after {
+  display: none;
+}
+
+@layer components {
+  /* Card surface — single thin shadow, no inset highlight, no violet glow.
+     2026-05 airy redesign: trade depth illusion for calm legibility. */
+  .card {
+    @apply rounded-xl border;
+    border-color: var(--line);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06);
+    /* Long machine strings (paths, ids, hashes, addresses) wrap inside the
+       card rather than spilling past its edge or forcing page-wide scroll.
+       Inherited, so it only affects text that would actually overflow. */
+    overflow-wrap: anywhere;
+  }
+  html.light .card {
+    background: var(--card);
+    border-color: var(--line);
+    box-shadow: 0 1px 2px rgba(76, 29, 149, 0.04);
+  }
+  /* Hover: only darken the border, no translate, no extra shadow. */
+  .card-hover {
+    @apply transition-colors duration-150;
+  }
+  .card-hover:hover {
+    border-color: var(--line-hi);
+  }
+  /* Featured card — replaces the previous 2px violet side-stripe rail
+     (banned by impeccable) with a full-perimeter brand border. The
+     section is marked by a leading dot glyph in the title instead. */
+  .card-featured {
+    border-color: var(--line-hi);
+  }
+  html.light .card-featured {
+    border-color: rgba(109, 40, 217, 0.22);
+  }
+  /* Glass surfaces collapsed into the same look as .card.
+     Kept as aliases so the 50+ existing call sites still compile. */
+  .glass {
+    @apply rounded-xl border;
+    border-color: var(--line);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06);
+    overflow-wrap: anywhere;
+  }
+  .glass-hi {
+    @apply rounded-xl border;
+    border-color: var(--line-hi);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06);
+    overflow-wrap: anywhere;
+  }
+  html.light .glass,
+  html.light .glass-hi {
+    background: var(--card);
+    border-color: var(--line);
+    box-shadow: 0 1px 2px rgba(76, 29, 149, 0.04);
+  }
+  /* Subtle "thinking" gradient ring used on the agent avatar / running
+     turn indicators. */
+  .ring-ai {
+    background-image:
+      conic-gradient(from 180deg at 50% 50%,
+        rgba(139, 92, 246, 0) 0deg,
+        rgba(139, 92, 246, 0.7) 120deg,
+        rgba(34, 211, 238, 0.7) 240deg,
+        rgba(139, 92, 246, 0) 360deg);
+  }
+  .card-head {
+    @apply flex flex-wrap items-start justify-between gap-3 px-4 py-4 border-b;
+    border-color: var(--line);
+  }
+  html.light .card-head {
+    border-color: var(--line);
+  }
+  .card-title {
+    @apply text-[14px] font-medium;
+    color: var(--text-base);
+    letter-spacing: 0;
+  }
+  .card-subtle {
+    @apply text-[13px] leading-relaxed;
+    color: var(--text-muted);
+  }
+  .stat-label {
+    @apply text-[12px] font-medium;
+    color: var(--text-muted);
+    letter-spacing: 0;
+  }
+  .stat-value {
+    @apply text-[24px] leading-tight font-medium tabular-nums;
+    color: var(--text-base);
+    letter-spacing: 0;
+  }
+  .stat-delta-up { @apply text-ok text-[12px] font-medium; }
+  .stat-delta-down { @apply text-danger text-[12px] font-medium; }
+
+  .pill {
+    @apply inline-flex min-w-0 max-w-full items-center gap-1 rounded-full border px-2.5 py-0.5 text-[12px] font-medium;
+    border-color: var(--line-hi);
+    background: var(--card);
+    color: var(--text-muted);
+    letter-spacing: 0;
+    text-transform: none;
+    /* Badges must never wrap into a vertical stack inside narrow list
+       rows ("workspace" → "workspac/e", "工作区" → two CJK lines).
+       Long content (market codes) clips instead of wrapping. */
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .pill-ok { @apply border-ok/30 bg-ok/10 text-ok; }
+  .pill-warn { @apply border-warn/30 bg-warn/10 text-warn; }
+  .pill-err { @apply border-danger/30 bg-danger/10 text-danger; }
+  .pill-brand { @apply border-brand-500/30 bg-brand-500/10 text-brand-300; }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-md border border-brand-500/20 px-2 py-0.5 text-[12px] text-ink-200 font-mono;
+    background: rgba(19, 20, 38, 0.7);
+    letter-spacing: 0;
+  }
+  html.light .chip {
+    background: rgba(252, 251, 255, 0.7);
+  }
+
+  /* <TermTip> — inline jargon explainer. The trigger inherits the
+     surrounding text style with a dashed underline; the standalone
+     "?" badge variant is a quiet circle. The popover itself is portaled
+     to <body> with fixed positioning (see TermTip.tsx). */
+  .term-tip {
+    @apply inline-flex items-center align-baseline;
+    border-bottom: 1px dashed color-mix(in oklab, currentColor 55%, transparent);
+    cursor: help;
+  }
+  .term-tip:hover {
+    border-bottom-color: currentColor;
+  }
+  .term-tip:focus-visible {
+    @apply outline-none rounded-sm;
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--violet) 45%, transparent);
+  }
+  .term-tip-badge {
+    @apply inline-flex h-[15px] w-[15px] shrink-0 items-center justify-center rounded-full border align-[1px] text-[10px] font-medium leading-none;
+    border-color: var(--line-hi);
+    color: var(--text-muted);
+    background: var(--card);
+  }
+  .term-tip:hover .term-tip-badge {
+    color: var(--text-base);
+  }
+  .term-tip-popover {
+    @apply fixed z-[70] rounded-lg border px-3 py-2.5;
+    border-color: var(--line-hi);
+    background: var(--card);
+    box-shadow: 0 8px 24px rgba(2, 6, 23, 0.35);
+    overflow-y: auto;
+  }
+  html.light .term-tip-popover {
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  }
+  .term-tip-title {
+    @apply text-[12px] font-medium;
+    color: var(--text-base);
+  }
+  .term-tip-body {
+    @apply mt-1 text-[12px] leading-relaxed;
+    color: var(--text-muted);
+  }
+  .divider { @apply border-t border-brand-500/10; }
+
+  .table {
+    @apply w-full text-[14px] text-ink-200;
+  }
+  .table th {
+    @apply text-left font-medium text-[12px] text-ink-400 border-b border-brand-500/10 py-2.5 px-3;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .table td {
+    @apply border-b border-brand-500/10 py-3 px-3 align-top;
+  }
+  .table tr:hover td { @apply bg-brand-500/5; }
+
+  /* Compact table — Codex-density variant for overview/cockpit lists.
+     Tighter rows + smaller type so holdings / trades read as a dense
+     list rather than a roomy data grid. */
+  .table-compact {
+    @apply text-[12.5px];
+  }
+  .table-compact th {
+    @apply py-1.5 px-2.5 text-[11px];
+  }
+  .table-compact td {
+    @apply py-1.5 px-2.5;
+  }
+
+  .embedded-scroll {
+    @apply overflow-auto overscroll-contain;
+    scrollbar-gutter: stable;
+  }
+  .embedded-list-scroll {
+    @apply max-h-80 overflow-auto overscroll-contain pr-1;
+    scrollbar-gutter: stable;
+  }
+  .embedded-list-scroll-sm {
+    @apply max-h-48 overflow-auto overscroll-contain pr-1;
+    scrollbar-gutter: stable;
+  }
+  .embedded-list-scroll-lg {
+    @apply max-h-[420px] overflow-auto overscroll-contain pr-1;
+    scrollbar-gutter: stable;
+  }
+  .embedded-table-scroll {
+    @apply max-h-[420px] overflow-auto overscroll-contain rounded-lg border border-brand-500/10;
+    scrollbar-gutter: stable;
+  }
+  .embedded-table-scroll > table {
+    min-width: 100%;
+  }
+  .embedded-table-scroll thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--table-sticky-bg);
+    backdrop-filter: blur(12px);
+  }
+
+  .btn {
+    @apply inline-flex min-h-9 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors;
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-ink-950;
+    letter-spacing: 0;
+  }
+  .btn-ghost {
+    @apply btn border transition-colors;
+    border-color: var(--line);
+    color: var(--text-base);
+  }
+  .btn-ghost:hover { background: var(--card-hi); border-color: var(--line-hi); }
+  html.light .btn-ghost:hover {
+    color: var(--text-base);
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white hover:bg-brand-700;
+  }
+  /* Disabled actions must stop competing with the screen's single solid
+     primary (e.g. an untouched "Save" next to the header CTA). */
+  .btn:disabled {
+    @apply cursor-not-allowed opacity-45;
+  }
+
+  .input-dark {
+    @apply min-h-9 w-full border rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:border-brand-500;
+    background: var(--bg);
+    border-color: var(--line-hi);
+    color: var(--text-base);
+  }
+  .input-dark::placeholder { color: var(--text-muted); opacity: 1; }
+  textarea.input-dark { @apply font-mono; }
+
+  .mode-toggle-wrap {
+    @apply inline-flex rounded-full border border-brand-500/20 p-0.5;
+    background: rgba(10, 11, 26, 0.6);
+  }
+  html.light .mode-toggle-wrap {
+    background: rgba(248, 247, 255, 0.6);
+  }
+  .mode-toggle-btn {
+    @apply px-3.5 py-1 text-[12px] font-medium rounded-full transition-colors;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .mode-toggle-active {
+    @apply bg-brand-500 text-white;
+  }
+  .mode-toggle-idle {
+    @apply text-ink-300 hover:text-white;
+  }
+
+  .icon-btn {
+    @apply inline-flex items-center justify-center w-9 h-9 rounded-lg border border-brand-500/15
+           hover:border-brand-500/40 transition-colors relative;
+    background: var(--card);
+    color: var(--text-muted);
+  }
+  html.light .icon-btn:hover {
+    color: var(--text-base);
+  }
+
+  .sidebar-item {
+    @apply flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-all;
+  }
+  .sidebar-item-idle {
+    @apply text-ink-300 hover:bg-brand-500/10;
+  }
+  html.light .sidebar-item-idle {
+    color: var(--text-muted);
+  }
+  html.light .sidebar-item-idle:hover {
+    color: var(--text-base);
+    background: rgba(139, 92, 246, 0.08);
+  }
+  /* Active sidebar item — replaces the previous 2px inset rail
+     (impeccable side-stripe ban) with a full background tint + bolder
+     weight contrast. Same affordance, no decorative stripe. */
+  .sidebar-item-active {
+    @apply bg-brand-500/10 font-semibold;
+    color: var(--text-base);
+  }
+
+  /* ── Top-nav pills ─────────────────────────────────────────────
+     2026-05 redesign: still pill-shaped, but no glass shell, no
+     multi-layer shadow. Just a thin border + single subtle shadow. */
+  .topnav-rail {
+    @apply inline-flex items-center gap-0.5 rounded-full border px-1 py-1;
+    border-color: var(--line);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06);
+  }
+  html.light .topnav-rail {
+    background: var(--card);
+    border-color: rgba(109, 40, 217, 0.10);
+    box-shadow: 0 1px 2px rgba(76, 29, 149, 0.04);
+  }
+  .topnav-pill {
+    @apply inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5
+           text-[13px] font-medium transition-colors;
+    color: var(--text-muted);
+    letter-spacing: 0;
+  }
+  .topnav-pill:hover {
+    color: var(--text-base);
+    background: rgba(139, 92, 246, 0.08);
+  }
+  .topnav-pill-active {
+    color: #ffffff;
+    background: var(--violet);
+  }
+  html.light .topnav-pill-active {
+    color: #ffffff;
+    background: var(--violet);
+  }
+
+  /* Light mode contrast guard for the authenticated operator surface.
+     A lot of dashboard pages were originally tuned for dark glass panels
+     and still use ``text-white`` or pale accent tokens on translucent
+     cards. In light mode those surfaces become white or near-white, so
+     keep text dark unless the element itself is a solid action/badge. */
+  html.light .nerya-app-shell .text-white,
+  html.light .nerya-app-shell .hover\:text-white:hover {
+    color: var(--text-base);
+  }
+  html.light .nerya-app-shell .topnav-pill-active,
+  html.light .nerya-app-shell .topnav-pill-active .text-white,
+  html.light .nerya-app-shell .btn-primary,
+  html.light .nerya-app-shell .mode-toggle-active,
+  html.light .nerya-app-shell [class~="bg-brand-500"].text-white,
+  html.light .nerya-app-shell [class~="bg-brand-500/80"].text-white,
+  html.light .nerya-app-shell [class~="bg-rose-500"].text-white,
+  html.light .nerya-app-shell [class~="bg-amber-500"].text-white,
+  html.light .nerya-app-shell [class~="bg-danger"].text-white {
+    color: #ffffff;
+  }
+  html.light .nerya-app-shell .sidebar-item-active {
+    color: var(--text-base);
+    background: rgba(139, 92, 246, 0.12);
+    font-weight: 600;
+  }
+  html.light .nerya-app-shell .mode-toggle-idle {
+    color: var(--text-muted);
+  }
+  html.light .nerya-app-shell .mode-toggle-idle:hover {
+    color: var(--text-base);
+  }
+  html.light .nerya-app-shell .pill-brand,
+  html.light .nerya-app-shell .text-brand-100,
+  html.light .nerya-app-shell .text-brand-200,
+  html.light .nerya-app-shell .text-brand-300,
+  html.light .nerya-app-shell .text-brand-200\/80,
+  html.light .nerya-app-shell .text-brand-300\/60,
+  html.light .nerya-app-shell .text-brand-300\/80,
+  html.light .nerya-app-shell .hover\:text-brand-100:hover,
+  html.light .nerya-app-shell .hover\:text-brand-200:hover,
+  html.light .nerya-app-shell .group:hover .group-hover\:text-brand-200 {
+    color: #5b21b6;
+  }
+  html.light .nerya-app-shell .text-fluid-300,
+  html.light .nerya-app-shell .text-fluid-400,
+  html.light .nerya-app-shell .text-fluid-400\/80 {
+    color: #0e7490;
+  }
+  html.light .nerya-app-shell .text-accent-300,
+  html.light .nerya-app-shell .text-accent-400 {
+    color: #047857;
+  }
+  html.light .nerya-app-shell .text-amber-100,
+  html.light .nerya-app-shell .text-amber-200,
+  html.light .nerya-app-shell .text-warn,
+  html.light .nerya-app-shell .text-warn\/80 {
+    color: #92400e;
+  }
+  html.light .nerya-app-shell .text-rose-100,
+  html.light .nerya-app-shell .text-rose-100\/85,
+  html.light .nerya-app-shell .text-rose-200,
+  html.light .nerya-app-shell .text-rose-200\/60,
+  html.light .nerya-app-shell .text-rose-300,
+  html.light .nerya-app-shell .text-danger {
+    color: #be123c;
+  }
+  html.light .nerya-app-shell .text-emerald-100,
+  html.light .nerya-app-shell .text-emerald-200,
+  html.light .nerya-app-shell .text-emerald-200\/90,
+  html.light .nerya-app-shell .text-ok {
+    color: #047857;
+  }
+  html.light .nerya-app-shell .text-sky-200 {
+    color: #0369a1;
+  }
+  .topnav-pill-icon {
+    @apply inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full p-2 transition-colors;
+    color: var(--text-muted);
+  }
+  .topnav-pill-icon:hover {
+    color: var(--text-base);
+    background: rgba(139, 92, 246, 0.10);
+  }
+
+  /* Chat bubbles — single thin shadow, keeps boundary feel for
+     dialog without competing with content. */
+  .bubble-user {
+    @apply rounded-2xl rounded-br-md border border-brand-500/25
+           px-4 py-3 text-[14px];
+    background: rgba(139, 92, 246, 0.12);
+    color: var(--text-base);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.04);
+    /* Keep long, unbreakable tokens (file paths, URLs, hashes) inside the
+       card instead of overflowing past its rounded edge. */
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  html.light .bubble-user {
+    background: rgba(139, 92, 246, 0.08);
+    border-color: rgba(109, 40, 217, 0.18);
+    color: #1a1830;
+    box-shadow: 0 1px 2px rgba(76, 29, 149, 0.04);
+  }
+  .bubble-ai {
+    @apply rounded-2xl rounded-bl-md border
+           px-4 py-3 text-[14px];
+    border-color: var(--line);
+    background: var(--card);
+    color: var(--text-base);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.04);
+    /* Keep long, unbreakable tokens (file paths, URLs, hashes) inside the
+       card instead of overflowing past its rounded edge. */
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  html.light .bubble-ai {
+    background: var(--card);
+    border-color: rgba(109, 40, 217, 0.10);
+    color: #1a1830;
+    box-shadow: 0 1px 2px rgba(76, 29, 149, 0.04);
+  }
+  .typing-dot {
+    @apply inline-block w-1.5 h-1.5 rounded-full bg-fluid-400;
+    animation: ai-pulse 1.4s ease-in-out infinite;
+  }
+  .typing-dot:nth-child(2) { animation-delay: 0.18s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.36s; }
+
+  /* Skeleton shimmer — replaces "Loading runtime status…" plain text
+     placeholders with a moving gradient. */
+  .skeleton {
+    @apply rounded-md;
+    background: linear-gradient(
+      90deg,
+      rgba(139, 92, 246, 0.06) 0%,
+      rgba(139, 92, 246, 0.16) 50%,
+      rgba(139, 92, 246, 0.06) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 2.4s linear infinite;
+  }
+}
+
+.grid-bg {
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 28px 28px;
+  background-position: -1px -1px;
+}
+
+/* Hide scrollbar but keep scroll on the top-nav rail. The rail is
+   horizontally scrollable on narrow viewports — without this, a 1px
+   tall WebKit scrollbar adds a visible artifact to the pill bar. */
+.no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+@media (max-width: 640px) {
+  .card,
+  .glass,
+  .glass-hi {
+    border-radius: 0.875rem;
+  }
+
+  .card-head {
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.875rem 1rem;
+  }
+
+  .card-head > div {
+    max-width: 100%;
+  }
+
+  .stat-value {
+    font-size: 1.375rem;
+  }
+
+  .table th {
+    padding: 0.6rem 0.625rem;
+    font-size: 0.625rem;
+  }
+
+  .table td {
+    padding: 0.7rem 0.625rem;
+  }
+
+  .topnav-rail {
+    justify-content: flex-start;
+    border-radius: 0.875rem;
+    padding: 0.25rem;
+  }
+
+  .topnav-pill {
+    padding: 0.45rem 0.65rem;
+    font-size: 0.75rem;
+  }
+
+  .topnav-pill-icon {
+    width: 2rem;
+    height: 2rem;
+    padding: 0.375rem;
+  }
+
+  .embedded-table-scroll {
+    max-height: min(420px, 70dvh);
+  }
+
+  .input-dark {
+    font-size: 16px;
+  }
+
+  textarea.input-dark {
+    font-size: 13px;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+  border: 2px solid var(--scrollbar-track);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+
+/* pulse-ring / pulse-violet — softened in 2026-05 redesign.
+   Decorative status pulsing was too attention-grabbing; we now just
+   render a still dot. The classes are kept as no-ops so call sites
+   still compile during the rollout, and so prefers-reduced-motion
+   automatically benefits without per-call-site changes. */
+.pulse-ring,
+.pulse-violet {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-ring,
+  .pulse-violet,
+  .typing-dot {
+    animation: none;
+  }
+}
+
+/* 打字机光标闪烁 */
+@keyframes typewriter-blink {
+  from, to { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* Shared semantic syntax colours for Markdown, file previews and the editor.
+   Theme tokens keep normal-size code readable on each native surface. */
+.hljs { color: var(--text-base); background: transparent; }
+.hljs-comment,
+.hljs-quote { color: var(--syntax-comment); font-style: italic; }
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-name,
+.hljs-tag,
+.hljs-selector-id,
+.hljs-selector-class { color: var(--syntax-keyword); }
+.hljs-built_in,
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-title.class_ { color: var(--syntax-type); }
+.hljs-title,
+.hljs-title.function_,
+.hljs-function .hljs-title { color: var(--syntax-function); }
+.hljs-string,
+.hljs-attr,
+.hljs-addition,
+.hljs-meta-string,
+.hljs-template-tag { color: var(--syntax-string); }
+.hljs-number,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-regexp { color: var(--syntax-number); }
+.hljs-symbol,
+.hljs-bullet,
+.hljs-meta,
+.hljs-attribute,
+.hljs-link { color: var(--syntax-meta); }
+.hljs-deletion { color: var(--syntax-deletion); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+
+/* ── Codex-style shell (2026-06) ───────────────────────────────────
+   Left command rail + ⌘K palette + command-home composer. Flat, calm
+   surfaces; keeps the Nerya violet accent for active/focus states. */
+@layer components {
+  /* Every surface inherits the same theme; no nested palette takeovers. */
+  .nerya-settings-shell main {
+    background: var(--bg-deep);
+  }
+  .nerya-settings-shell .grid-bg {
+    display: none;
+  }
+  .nerya-settings-shell .sidebar-item-active {
+    background: rgba(139, 92, 246, 0.16);
+    color: var(--text-base);
+    font-weight: 600;
+  }
+  .nerya-settings-shell .input-dark {
+    border-color: var(--line);
+    background: var(--card-hi);
+    color: var(--text-base);
+  }
+  .nerya-settings-shell .input-dark::placeholder {
+    color: var(--text-muted);
+  }
+  .nerya-settings-shell .btn-ghost {
+    border-color: var(--line);
+    background: var(--card-hi);
+    color: var(--text-base);
+  }
+  .nerya-settings-shell .btn-ghost:hover {
+    border-color: var(--line-hi);
+    background: rgba(139, 92, 246, 0.10);
+  }
+  .nerya-sidebar .sidebar-item {
+    @apply min-h-9 rounded-lg px-2.5 py-2 text-[13px];
+  }
+
+  .cmdk-panel {
+    @apply rounded-2xl border;
+    border-color: var(--line-hi);
+    background: var(--card-hi);
+    box-shadow: 0 24px 60px -12px rgba(2, 6, 23, 0.55);
+  }
+  html.light .cmdk-panel {
+    background: var(--overlay-surface);
+    border-color: var(--line-hi);
+    box-shadow: 0 24px 60px -12px rgba(76, 29, 149, 0.18);
+  }
+  .cmdk-kbd {
+    @apply inline-flex h-5 min-w-[20px] items-center justify-center rounded border px-1 text-[10px] font-medium;
+    border-color: var(--line);
+    color: var(--text-muted);
+    background: var(--card);
+    font-family: inherit;
+  }
+
+  /* Command-home composer — the centred "what should we build?" box. */
+  .composer-shell {
+    @apply rounded-2xl border transition-colors;
+    border-color: var(--line-hi);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06);
+  }
+  .composer-shell:focus-within {
+    border-color: var(--violet);
+  }
+  html.light .composer-shell {
+    background: var(--card);
+    border-color: var(--line-hi);
+  }
+  .composer-chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] transition-colors;
+    border-color: var(--line);
+    color: var(--text-muted);
+    background: var(--card);
+  }
+  .composer-chip:hover {
+    color: var(--text-base);
+    border-color: var(--line-hi);
+  }
+  .command-home-root {
+    background: var(--bg-deep);
+    color: var(--text-base);
+  }
+  .nerya-app-shell:has(.command-home-root) main {
+    background: var(--bg-deep);
+  }
+  .nerya-app-shell:has(.command-home-root) .grid-bg {
+    display: none;
+  }
+
+  /* Compact settings (Codex-style) — low-contrast grouped rows, neutral
+     surfaces, and restrained card frames. */
+  .settings-flat .card {
+    border: 1px solid var(--line);
+    background: var(--card);
+    box-shadow: none;
+    border-radius: 10px;
+  }
+  html.light .settings-flat .card {
+    border: 1px solid var(--line);
+    background: var(--card);
+    box-shadow: none;
+  }
+  .settings-flat .card-head {
+    padding: 10px 12px;
+    border-bottom-color: var(--line);
+  }
+  .settings-flat .card-title {
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .settings-flat .card-subtle {
+    font-size: 11.5px;
+    line-height: 1.35;
+  }
+  .settings-flat .card-padded > div:last-child {
+    padding: 10px 12px;
+  }
+  .settings-row {
+    border-color: var(--line);
+  }
+  .settings-group-panel {
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--card);
+  }
+}
+
+/* Shared accessible overlays: opaque in both themes, one layering scale. */
+.ui-modal-overlay { position: fixed; inset: 0; z-index: 1200; background: rgb(2 6 23 / 48%); }
+.ui-dialog {
+  position: fixed; z-index: 1201; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: min(500px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto;
+  border: 1px solid var(--line-hi); border-radius: 16px; padding: 24px;
+  background: var(--overlay-surface); color: var(--text-base);
+  box-shadow: 0 12px 40px rgb(2 6 23 / 20%);
+}
+.ui-dialog.ui-command-palette { top: min(12dvh, 96px); transform: translateX(-50%); width: min(600px, calc(100vw - 24px)); padding: 0; overflow: hidden; }
+.ui-dialog.agent-create-dialog { width: min(760px, calc(100vw - 32px)); padding: 0; }
+.ui-select-menu {
+  z-index: 1250; min-width: 120px; max-width: calc(100vw - 16px);
+  max-height: min(320px, var(--radix-dropdown-menu-content-available-height)); overflow-y: auto;
+  border: 1px solid var(--line-hi); border-radius: 12px; padding: 4px;
+  background: var(--overlay-surface); color: var(--text-base); box-shadow: 0 6px 20px rgb(2 6 23 / 14%);
+}
+.ui-select-option { display: flex; gap: 8px; align-items: center; min-height: 36px; padding: 8px 10px; border-radius: 8px; font-size: 13px; cursor: pointer; outline: none; }
+.ui-select-option[data-highlighted] { background: rgb(139 92 246 / 15%); }
+.ui-select-option[data-state=checked] { font-weight: 600; }
+.ui-select-option[data-disabled] { opacity: .45; cursor: not-allowed; }
+.ui-icon-button { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; min-width: 32px; border-radius: 8px; color: var(--text-muted); }
+.ui-icon-button:hover { background: rgb(139 92 246 / 10%); color: var(--text-base); }
+.ui-danger-button { background: #be3146; color: white; border-color: transparent; }
+.ui-danger-button:hover { filter: brightness(.92); }
+.ui-toast-stack { position: fixed; z-index: 1300; right: 16px; bottom: max(16px, env(safe-area-inset-bottom)); width: min(380px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.ui-toast { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid var(--line-hi); border-radius: 12px; background: var(--overlay-surface); color: var(--text-base); font-size: 13px; line-height: 1.5; box-shadow: 0 4px 16px rgb(2 6 23 / 12%); pointer-events: auto; }
+.ui-toast[data-tone=error] { border-color: var(--err); }
+.ui-toast[data-tone=warn] { border-color: var(--warn); }
+.ui-toast[data-tone=ok] { border-color: var(--ok); }
+.ui-drawer-overlay { z-index: 1100; }
+.ui-navigation-drawer { position: fixed; z-index: 1101; inset: 0 auto 0 0; display: flex; flex-direction: column; width: min(320px, calc(100vw - 40px)); height: 100dvh; background: var(--overlay-surface); color: var(--text-base); border-right: 1px solid var(--line); }
+.ui-navigation-drawer .nerya-sidebar { width: 100%; height: 100%; border: 0; }
+.nerya-app-shell { height: 100dvh; }
+.nerya-native-window { position: relative; box-sizing: border-box; }
+.nerya-sidebar-titlebar-drag,
+.nerya-content-titlebar-drag { display: none; }
+.nerya-native-window .nerya-sidebar-titlebar-drag,
+.nerya-native-window .nerya-content-titlebar-drag,
+.nerya-login-titlebar-drag {
+  display: block;
+  height: 38px;
+  min-height: 38px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.nerya-native-window .nerya-sidebar-titlebar-drag { background: var(--panel-bg); }
+.nerya-native-window .nerya-content-titlebar-drag,
+.nerya-login-titlebar-drag { background: var(--bg-deep); }
+.nerya-native-login { min-height: 100dvh; background: var(--bg-deep); }
+/* Console controls share tokens in the document, including Radix portals. */
+.ui-choice {
+  display: inline-flex; align-items: center; justify-content: space-between; gap: 8px;
+  min-height: 34px; min-width: 0; max-width: 100%; padding: 6px 10px;
+  border: 1px solid var(--line-hi); border-radius: 8px; background: var(--card);
+  color: var(--text-base); font: inherit; font-size: 13px; line-height: 20px; text-align: left;
+}
+label > .ui-choice { width: 100%; }
+.ui-choice:hover, .ui-choice[data-state=open] { border-color: var(--violet); }
+.ui-choice:disabled { cursor: not-allowed; opacity: .55; }
+.ui-choice[aria-invalid=true] { border-color: var(--err); }
+.ui-choice-panel {
+  z-index: 1250; width: var(--radix-popover-trigger-width); min-width: min(240px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px); max-height: var(--radix-popover-content-available-height);
+  overflow: hidden; border: 1px solid var(--line-hi); border-radius: 10px;
+  background: var(--overlay-surface); color: var(--text-base); box-shadow: 0 8px 24px rgb(2 6 23 / 16%);
+}
+.ui-choice-search { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); color: var(--text-muted); }
+.ui-choice-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text-base); font-size: 14px; line-height: 24px; }
+.ui-choice-search input::-webkit-search-cancel-button, .ui-search-field input::-webkit-search-cancel-button { display: none; }
+.ui-choice-options { max-height: min(300px, calc(var(--radix-popover-content-available-height) - 54px)); overflow-y: auto; overscroll-behavior: contain; padding: 4px; outline: none; }
+.ui-choice-option { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 8px 10px; border-radius: 6px; font-size: 13px; line-height: 20px; cursor: pointer; }
+.ui-choice-option[data-active=true] { background: var(--card-hi); outline: 1px solid var(--line-hi); outline-offset: -1px; }
+.ui-choice-option[aria-selected=true] { color: rgb(var(--brand-readable)); font-weight: 600; }
+.ui-choice-option[aria-disabled=true] { opacity: .45; cursor: not-allowed; }
+.ui-choice-group { padding: 10px 10px 4px; color: var(--text-muted); font-size: 12px; font-weight: 500; }
+.ui-choice-form-value { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+/* Panels sit above navigation (1100) and below confirm dialogs (1200). */
+.ui-panel-overlay { position: fixed; z-index: 1150; inset: 0; background: rgb(2 6 23 / 48%); }
+.ui-panel { position: fixed; z-index: 1151; display: flex; flex-direction: column; min-width: 0; overflow: hidden; background: var(--overlay-surface); color: var(--text-base); border: 1px solid var(--line-hi); outline: none; }
+.ui-panel-center { left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(var(--panel-width), calc(100vw - 24px)); max-height: calc(100dvh - 32px); border-radius: 14px; }
+.ui-panel-right { inset: 0 0 0 auto; width: min(var(--panel-width), 100vw); height: 100dvh; border-width: 0 0 0 1px; }
+.ui-panel > aside, .ui-panel > section, .ui-panel > .ui-panel-body { width: 100%; max-width: none; min-height: 0; border: 0; border-radius: 0; background: var(--overlay-surface); box-shadow: none; }
+.ui-search-field { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 38px; border: 1px solid var(--line-hi); border-radius: 8px; background: var(--bg); color: var(--text-muted); padding: 2px 10px; }
+.ui-search-field:focus-within { outline: 2px solid var(--violet); outline-offset: 2px; }
+.ui-search-field input { min-width: 0; width: 100%; background: transparent; color: var(--text-base); padding: 6px 0; font-size: 13px; line-height: 20px; outline: none; }
+.ui-search-field input::placeholder { color: var(--text-muted); }
+.ui-filter-bar { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.ui-filter-bar > button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 6px 12px; border: 1px solid transparent; border-radius: 8px; color: var(--text-muted); font-size: 13px; }
+.ui-filter-bar > button:hover { color: var(--text-base); background: var(--card-hi); }
+.ui-filter-bar > button[aria-pressed=true] { background: var(--card-hi); border-color: var(--line-hi); color: var(--text-base); font-weight: 600; }
+.ui-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding-top: 14px; color: var(--text-muted); font-size: 12px; }
+.ui-table-viewport { max-width: 100%; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 10px; scrollbar-gutter: stable; }
+.ui-table-viewport table { min-width: 100%; }
+.ui-table-viewport thead th { position: sticky; top: 0; z-index: 1; background: var(--table-sticky-bg); white-space: nowrap; }
+.ui-table-viewport tbody tr:last-child td { border-bottom: 0; }
+input[type=checkbox], input[type=radio] { accent-color: var(--violet); }
+@media (max-width: 767px) {
+  .ui-choice { min-height: 40px; }
+  .ui-choice-option { min-height: 42px; }
+  .ui-choice-search input, .ui-search-field input { font-size: 16px; }
+  .ui-filter-bar > button { min-height: 40px; }
+}
+.nerya-app-shell > .ui-desktop-navigation { height: 100%; }
+.ui-desktop-navigation .nerya-sidebar { height: 100%; }
+:where(button, a, input, textarea, select, [tabindex]):focus-visible { outline: 2px solid var(--violet); outline-offset: 3px; }
+.ui-skip-link { position: fixed; z-index: 1400; left: 12px; top: -100px; padding: 10px 14px; border-radius: 8px; background: var(--overlay-surface); color: var(--text-base); }
+.ui-skip-link:focus { top: 12px; }
+@media (max-width: 767px) {
+  .ui-navigation-drawer .sidebar-item { min-height: 42px; }
+  .ui-dialog { padding: 20px; }
+  .ui-select-option { min-height: 42px; }
+}
+@media (pointer: coarse) {
+  .agent-library button, .agent-create-dialog button { min-height: 40px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-dialog, .ui-select-menu, .ui-navigation-drawer, .nerya-sidebar { animation: none !important; transition: none !important; }
+  .skeleton, .animate-shimmer, .animate-ai-pulse { animation: none !important; }
+}
+
+.workbench-search-hit { outline: 2px solid var(--violet); outline-offset: 4px; }
+
+/* Composer groups adapt to their panel width, including a narrow split pane. */
+[data-chat-composer] { container: composer / inline-size; }
+[data-composer-toolbar] { display:flex; align-items:center; flex-wrap:nowrap; gap:4px; margin-top:10px; }
+[data-composer-toolbar] > button { flex:none; }
+[data-composer-options], [data-composer-models], [data-composer-actions] { display:flex; align-items:center; gap:3px; min-width:0; }
+[data-composer-options] { flex:none; }
+[data-composer-models] { flex:1; justify-content:flex-end; }
+[data-composer-actions] { flex:none; margin-left:4px; }
+[data-composer-model-trigger] { max-width:220px; }
+[data-composer-toolbar] button { min-height:32px; }
+[data-testid="composer-add"][data-work-mode="plan"], [data-testid="composer-add"][data-work-mode="goal"] { color: rgb(var(--brand-readable)); }
+@container composer (max-width:480px) {
+ [data-composer-toolbar] { display:grid; grid-template-columns:32px minmax(0,1fr) auto; gap:4px; }
+ [data-composer-toolbar] > input { display:none; }
+ [data-composer-options] { grid-column:2; grid-row:1; }
+ [data-composer-actions] { grid-column:3; grid-row:1 / span 2; align-self:end; }
+ [data-composer-models] { grid-column:1 / span 2; grid-row:2; margin-left:0; justify-content:flex-start; }
+ [data-composer-model-trigger] { max-width:190px; }
+ [data-composer-models] button:first-child > svg:first-child { display:none; }
+ [data-composer-work-mode] { display:none; }
+}
+@media (pointer:coarse), (max-width:767px) {
+ [data-chat-composer] button,
+ [data-testid="task-dock-header"] button,
+ [data-testid="workspace-files"] button,
+ [data-testid="user-interaction"] button,
+ .ui-icon-button,.ui-select-option { min-height:44px; min-width:44px; }
+ [data-chat-composer] textarea { min-height:44px; }
+}
+@container composer (max-width:480px) {
+ [data-composer-toolbar] { grid-template-columns:44px minmax(0,1fr) auto; }
+ [data-composer-toolbar] button { min-height:44px; min-width:44px; }
+ [data-composer-toolbar]:has([data-composer-actions] > button:nth-child(2)) [data-composer-actions] { grid-column:1 / -1; grid-row:3; justify-content:flex-end; flex-wrap:wrap; margin-left:0; }
+ [data-composer-toolbar]:has([data-composer-actions] > button:nth-child(2)) [data-composer-models] { grid-column:1 / -1; }
+}
+
+[data-testid="agent-start"] [role="tablist"] { scrollbar-width:none; }
+[data-testid="agent-start"] [role="tablist"]::-webkit-scrollbar { display:none; }
+@media(max-width:480px) {
+ [data-testid="agent-start"] [role="tablist"] { flex-wrap:wrap; overflow:visible; gap:2px; }
+ [data-testid="agent-start"] [role="tab"] { padding-left:9px; padding-right:9px; min-height:34px; }
+ [data-chat-composer="hero"] textarea { min-height:64px; }
+}
+
+/* Native range highlight survives focus returning to the conversation search field. */
+::highlight(nerya-match) { background: #fde68a; color: #422006; }
