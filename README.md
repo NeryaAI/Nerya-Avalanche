@@ -6,20 +6,21 @@
 
 ## 中文演示与 Pitch
 
-- [两分钟 4K 中文 demo · MiMo v2](https://github.com/NeryaAI/Nerya-Avalanche/releases/tag/demo-20261013-mimo-v2)：MiMo v2.5 TTS 白桦中文旁白、现成 Future Forward 音乐、重新同步的内嵌中文字幕；实际录屏界面为英文。[旧版保留](https://github.com/NeryaAI/Nerya-Avalanche/releases/tag/demo-20261013)。
+- [新版两分钟 4K 中文链上 demo + 原速完整对话](https://github.com/NeryaAI/Nerya-Avalanche/releases/tag/demo-20261013-onchain-v3)：重新录制中文 UI、自然语言需求、LFJ 池子策略、Fuji 链上换币准备、三智能体投研和看板创建；MiMo v2.5 TTS 白桦旁白、现成 Future Forward 音乐、内嵌中文字幕。短版保留四次初始输入和完整最终回复，仅加速执行等待；原速长版另保留两轮看板修正与应用过程。
+- 旧版保留：[MiMo v2](https://github.com/NeryaAI/Nerya-Avalanche/releases/tag/demo-20261013-mimo-v2) / [v1](https://github.com/NeryaAI/Nerya-Avalanche/releases/tag/demo-20261013)。旧版界面为英文，含交易所行情回放，不作为新版链上能力的证明。
 - [十页可编辑中文 Pitch Deck](media/Nerya-Avalanche-Pitch-ZH.pptx) / [PDF](media/Nerya-Avalanche-Pitch-ZH.pdf)，含中文讲稿。保留最新 Solana 中文 deck 的原生版式，替换 Avalanche 场景。
-- [MiMo v2 中文字幕](media/nerya-avax-demo-2min-zh-mimo-v2.srt) / [旧版字幕](media/nerya-avax-demo-2min-zh.srt)。音乐素材库说明标注 AI-generated and rights-cleared，未独立审计。音频和字幕已做自动验收，不声称真人试听。
+- [新版中文字幕](media/nerya-avax-natural-onchain-zh.srt) / [录制说明](media/onchain-demo-v3.md)。音乐素材库说明标注 AI-generated and rights-cleared，未独立审计。音频和字幕已做自动验收，不声称真人试听。
 
-![真实 Avalanche 策略实验室](media/avalanche-dashboard.png)
+![本次实际创建的中文链上研究看板](media/avalanche-onchain-dashboard-v3.png)
 
 ## 展示内容与边界
 
 | 工作流 | 本次真实展示 | 当前限制 |
 | --- | --- | --- |
-| LFJ LP 池策略 | $1,000 纸面预算、锚定区间 ±10%、3 项测试通过 | 观察模式；未添加/移除流动性。缺少完整费用、库存、IL 与 bin 历史 |
-| AVAX 趋势策略 | 20 日突破 / 10 日退出、$500 纸面预算、5 项测试；180 根日线回放、2 笔模拟交易 | 模拟收益约 0.1557%，低于同期买入持有 4.2754%；不是 LFJ 历史成交或实盘 |
-| 多智能体投研 | 流动性、行情、风险三个成员成功完成，Lead 汇总 | 报价不等于成交；规模和历史证据限制保留 |
-| 看板创建 | 实际生成候选并 Apply，展示 Avalanche 策略实验室 | 未开启两策略调度，live trading 关闭 |
+| LFJ LP 池策略 | 中文自然语言创建 $1,000 预算、±10% 区间管理提醒；读取真实 Avalanche LFJ 池并静态验证 | 观察模式；未添加/移除流动性；历史数据缺口如实保留，不以 CEX 行情填充 |
+| Fuji 链上现货策略 | 中文创建 0.1 测试 USDC→WAVAX 策略；真实 DEX 路由报价、1% 滑点和有限权限准备 | 未签名、approve、入金或交换；报价不是成交；新提案不混用先前提案已部署 Vault |
+| 多智能体投研 | 池子/费用、链上路由、授权/资金风险三个成员完成任务，Lead 汇总完整报告 | Fuji 成员因缺有效提案绑定而未取得报价；报告保留缺口。看板后来补充的报价不冒充成员结果 |
+| 看板创建 | 自然语言生成候选，两轮纠正，实际审批应用，并验证三个原生链接 | 操作人员校正原生链接 schema、内部 revision 与全宽布局；不是无人干预一次成功。表头仍为英文安全 key |
 
 自进化、复盘与审批是通用运行时机制。本次 demo 不声称已经完成自主持续交易。仓库中的旧 Fuji 链上回执属于独立历史参考，不属于本次新建策略；本次未发送交易。Vault 页面说明凭据保护，不等于资产托管审计。会员、x402、A2A 和 ERC-8004 页面标为未来规划。
 
