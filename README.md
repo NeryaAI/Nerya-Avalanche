@@ -6,9 +6,9 @@
 
 ## 中文演示与 Pitch
 
-- [两分钟 4K 中文 demo](https://github.com/NeryaAI/Nerya-Avalanche/releases/tag/demo-20261013)：中文旁白、内嵌中文字幕；实际录屏界面为英文。
+- [两分钟 4K 中文 demo · MiMo v2](https://github.com/NeryaAI/Nerya-Avalanche/releases/tag/demo-20261013-mimo-v2)：MiMo v2.5 TTS 白桦中文旁白、现成 Future Forward 音乐、重新同步的内嵌中文字幕；实际录屏界面为英文。[旧版保留](https://github.com/NeryaAI/Nerya-Avalanche/releases/tag/demo-20261013)。
 - [十页可编辑中文 Pitch Deck](media/Nerya-Avalanche-Pitch-ZH.pptx) / [PDF](media/Nerya-Avalanche-Pitch-ZH.pdf)，含中文讲稿。保留最新 Solana 中文 deck 的原生版式，替换 Avalanche 场景。
-- [中文字幕](media/nerya-avax-demo-2min-zh.srt)。
+- [MiMo v2 中文字幕](media/nerya-avax-demo-2min-zh-mimo-v2.srt) / [旧版字幕](media/nerya-avax-demo-2min-zh.srt)。音乐素材库说明标注 AI-generated and rights-cleared，未独立审计。音频和字幕已做自动验收，不声称真人试听。
 
 ![真实 Avalanche 策略实验室](media/avalanche-dashboard.png)
 
